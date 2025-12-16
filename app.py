@@ -42,20 +42,27 @@ def get_db_connection():
 
 def carregar_rubricas_db():
     conn = get_db_connection()
-    df = pd.read_sql("SELECT * FROM rubricas", conn)
+    try:
+        df = pd.read_sql("SELECT * FROM rubricas", conn)
+    except:
+        df = pd.DataFrame(columns=["codigo", "tipo"])
     conn.close()
-    return df.set_index("codigo")["tipo"].to_dict()
+    if not df.empty:
+        return df.set_index("codigo")["tipo"].to_dict()
+    return {}
 
 def carregar_funcionarios_db():
     conn = get_db_connection()
-    df = pd.read_sql("SELECT * FROM funcionarios", conn)
+    try:
+        df = pd.read_sql("SELECT * FROM funcionarios", conn)
+    except:
+        df = pd.DataFrame(columns=["cpf", "nome", "departamento"])
     conn.close()
     return df
 
 def salvar_alteracoes_rubricas(df_edited):
     """Salva as edições feitas na tela de configuração."""
     conn = get_db_connection()
-    # Limpa e recria para garantir atualização total
     c = conn.cursor()
     c.execute("DELETE FROM rubricas")
     for index, row in df_edited.iterrows():
@@ -106,7 +113,7 @@ def estimar_tipo_rubrica_inicial(codigo):
 
 def process_xml_file(file_content, filename, rubricas_conhecidas):
     data_rows = []
-    novas_rubricas = {} # Armazena rubricas que ainda não estão no DB para salvar depois
+    novas_rubricas = {} 
     cpfs_encontrados = set()
 
     try:
@@ -138,8 +145,8 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                         tipo_final = rubricas_conhecidas[cod_rubr]
                     else:
                         tipo_final = estimar_tipo_rubrica_inicial(cod_rubr)
-                        novas_rubricas[cod_rubr] = tipo_final # Guarda para cadastrar depois
-                        rubricas_conhecidas[cod_rubr] = tipo_final # Atualiza memória local
+                        novas_rubricas[cod_rubr] = tipo_final 
+                        rubricas_conhecidas[cod_rubr] = tipo_final 
                     
                     data_rows.append({
                         "Competencia": per_apur,
@@ -198,7 +205,6 @@ if uploaded_file:
                 conn = get_db_connection()
                 c = conn.cursor()
                 for cod, tipo in novas_rubricas_geral.items():
-                    # Só insere se não existir (IGNORE)
                     c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo) VALUES (?, ?)", (cod, tipo))
                 conn.commit()
                 conn.close()
@@ -209,34 +215,36 @@ if uploaded_file:
             c = conn.cursor()
             novos_funcs = 0
             for cpf in cpfs_geral:
-                # Verifica se CPF existe
                 c.execute("SELECT cpf FROM funcionarios WHERE cpf = ?", (cpf,))
                 if not c.fetchone():
-                    # Insere vazio para o usuário preencher depois
                     c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (cpf, "", "Geral"))
                     novos_funcs += 1
             conn.commit()
             conn.close()
             
             if novos_funcs > 0:
-                st.toast(f"{novos_funcs} novos funcionários detectados.", icon="busts_in_silhouette")
+                # CORREÇÃO AQUI: Trocado 'busts_in_silhouette' por '👥'
+                st.toast(f"{novos_funcs} novos funcionários detectados.", icon="👥")
 
             # Salva dados processados na sessão
             st.session_state['df_bruto'] = pd.DataFrame(all_data)
-            st.rerun() # Recarrega a página para pegar os dados novos do banco
+            st.rerun()
 
 # --- EXIBIÇÃO ---
 
 if 'df_bruto' in st.session_state:
-    # Recarrega DB para garantir dados frescos (nomes e tipos editados)
     funcionarios_atualizado = carregar_funcionarios_db()
     
     df = st.session_state['df_bruto'].copy()
     
-    # Faz o MERGE dos dados do XML com os Nomes/Deptos do Banco
-    df = df.merge(funcionarios_atualizado, on="CPF", how="left")
-    df["nome"] = df["nome"].fillna(df["CPF"]) # Se não tiver nome, usa CPF
-    df["departamento"] = df["departamento"].fillna("Geral")
+    # Merge com segurança (check se funcionarios_atualizado não está vazio)
+    if not funcionarios_atualizado.empty:
+        df = df.merge(funcionarios_atualizado, on="CPF", how="left")
+        df["nome"] = df["nome"].fillna(df["CPF"]) 
+        df["departamento"] = df["departamento"].fillna("Geral")
+    else:
+        df["nome"] = df["CPF"]
+        df["departamento"] = "Geral"
     
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações & Cadastro"])
@@ -244,13 +252,11 @@ if 'df_bruto' in st.session_state:
     with tab1:
         st.subheader("Resumo da Folha")
         
-        # Filtros
         deptos = ["Todos"] + list(df["departamento"].unique())
         filtro_depto = st.selectbox("Filtrar por Departamento:", deptos)
         
         df_view = df if filtro_depto == "Todos" else df[df["departamento"] == filtro_depto]
         
-        # Resumo Financeiro
         resumo = df_view[df_view["Tipo"].isin(["Provento", "Desconto"])].pivot_table(
             index=["departamento", "Competencia"], 
             columns="Tipo", 
@@ -268,11 +274,12 @@ if 'df_bruto' in st.session_state:
     with tab2:
         col_sel1, col_sel2 = st.columns(2)
         with col_sel1:
-            # Dropdown mostra Nome (CPF)
             opcoes_func = df[["CPF", "nome"]].drop_duplicates()
-            opcoes_func["label"] = opcoes_func["nome"] + " (" + opcoes_func["CPF"] + ")"
+            # Garante que as colunas sejam strings para concatenação
+            opcoes_func["label"] = opcoes_func["nome"].astype(str) + " (" + opcoes_func["CPF"].astype(str) + ")"
             
             func_selecionado = st.selectbox("Selecione o Funcionário:", opcoes_func["label"])
+            # Extrai CPF
             cpf_selecionado = opcoes_func[opcoes_func["label"] == func_selecionado]["CPF"].values[0]
 
         with col_sel2:
@@ -283,7 +290,6 @@ if 'df_bruto' in st.session_state:
             mask = (df["CPF"] == cpf_selecionado) & (df["Competencia"] == comp_selecionada)
             df_holerite = df[mask].copy()
             
-            # Cards
             tot_prov = df_holerite[df_holerite["Tipo"] == "Provento"]["Valor"].sum()
             tot_desc = df_holerite[df_holerite["Tipo"] == "Desconto"]["Valor"].sum()
             
@@ -304,7 +310,6 @@ if 'df_bruto' in st.session_state:
             st.subheader("📝 Cadastro de Funcionários")
             df_funcs = carregar_funcionarios_db()
             
-            # Editor de Dados
             df_funcs_editado = st.data_editor(
                 df_funcs, 
                 num_rows="dynamic",
@@ -324,7 +329,10 @@ if 'df_bruto' in st.session_state:
         with c2:
             st.subheader("🏷️ Configuração de Rubricas")
             conn = get_db_connection()
-            df_rubs = pd.read_sql("SELECT * FROM rubricas", conn)
+            try:
+                df_rubs = pd.read_sql("SELECT * FROM rubricas", conn)
+            except:
+                df_rubs = pd.DataFrame(columns=["codigo", "tipo"])
             conn.close()
             
             df_rubs_editado = st.data_editor(
