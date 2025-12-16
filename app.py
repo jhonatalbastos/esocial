@@ -5,22 +5,39 @@ import zipfile
 import io
 import re
 import sqlite3
+import shutil
 
 # --- Configuração da Página ---
-st.set_page_config(page_title="Gestor eSocial Pro", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Gestor eSocial Master", layout="wide", page_icon="🏢")
 
-st.title("🏢 Gestor de Folha eSocial (Anual & Mensal)")
+st.title("🏢 Gestor de Folha eSocial (Persistente)")
 st.markdown("""
-Sistema inteligente com filtros temporais para análise de competências acumuladas.
+Sistema de auditoria com nomes personalizados e sistema de Backup para não perder dados no Streamlit Cloud.
 """)
 
-# --- GERENCIAMENTO DO BANCO DE DADOS (SQLite) ---
+# --- GERENCIAMENTO DO BANCO DE DADOS ---
 
 def init_db():
     conn = sqlite3.connect('esocial_db.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS rubricas (codigo TEXT PRIMARY KEY, tipo TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS funcionarios (cpf TEXT PRIMARY KEY, nome TEXT, departamento TEXT)''')
+    # Adicionado campo 'nome_personalizado'
+    c.execute('''CREATE TABLE IF NOT EXISTS rubricas (
+                    codigo TEXT PRIMARY KEY, 
+                    tipo TEXT,
+                    nome_personalizado TEXT
+                )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS funcionarios (
+                    cpf TEXT PRIMARY KEY, 
+                    nome TEXT, 
+                    departamento TEXT
+                )''')
+    
+    # Migração segura para quem já tem o DB antigo sem a coluna nova
+    try:
+        c.execute("ALTER TABLE rubricas ADD COLUMN nome_personalizado TEXT")
+    except sqlite3.OperationalError:
+        pass # Coluna já existe
+
     conn.commit()
     conn.close()
 
@@ -29,10 +46,15 @@ def get_db_connection():
 
 def carregar_rubricas_db():
     conn = get_db_connection()
-    try: df = pd.read_sql("SELECT * FROM rubricas", conn)
-    except: df = pd.DataFrame(columns=["codigo", "tipo"])
+    try: 
+        df = pd.read_sql("SELECT * FROM rubricas", conn)
+    except: 
+        df = pd.DataFrame(columns=["codigo", "tipo", "nome_personalizado"])
     conn.close()
-    if not df.empty: return df.set_index("codigo")["tipo"].to_dict()
+    
+    if not df.empty:
+        # Retorna um dicionário completo com tipo e nome
+        return df.set_index("codigo")[["tipo", "nome_personalizado"]].to_dict('index')
     return {}
 
 def carregar_funcionarios_db():
@@ -45,9 +67,13 @@ def carregar_funcionarios_db():
 def salvar_alteracoes_rubricas(df_edited):
     conn = get_db_connection()
     c = conn.cursor()
+    # Atualiza ou insere (Upsert simplificado deletando antes)
     c.execute("DELETE FROM rubricas")
     for index, row in df_edited.iterrows():
-        c.execute("INSERT INTO rubricas (codigo, tipo) VALUES (?, ?)", (row['codigo'], row['tipo']))
+        # Garante que nome_personalizado não seja NaN
+        nome_pers = row['nome_personalizado'] if pd.notna(row['nome_personalizado']) else ""
+        c.execute("INSERT INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", 
+                  (row['codigo'], row['tipo'], nome_pers))
     conn.commit()
     conn.close()
 
@@ -61,7 +87,34 @@ def salvar_alteracoes_funcionarios(df_edited):
     conn.commit()
     conn.close()
 
+# Inicializa DB
 init_db()
+
+# --- BACKUP E RESTAURAÇÃO (SIDEBAR) ---
+st.sidebar.header("💾 Backup do Banco de Dados")
+st.sidebar.info("O Streamlit Cloud apaga os dados ao reiniciar. Baixe o backup sempre que terminar o trabalho e suba novamente ao iniciar.")
+
+# Upload do Banco (Restaurar)
+uploaded_db = st.sidebar.file_uploader("Restaurar Backup (.db)", type=["db"])
+if uploaded_db:
+    if st.sidebar.button("♻️ Restaurar Dados"):
+        with open("esocial_db.db", "wb") as f:
+            f.write(uploaded_db.getbuffer())
+        st.success("Banco de dados restaurado! A página será recarregada.")
+        st.rerun()
+
+# Download do Banco (Salvar)
+if st.sidebar.button("Preparar Download"):
+    with open("esocial_db.db", "rb") as f:
+        db_bytes = f.read()
+    st.sidebar.download_button(
+        label="⬇️ Baixar Backup Agora",
+        data=db_bytes,
+        file_name="esocial_backup.db",
+        mime="application/x-sqlite3"
+    )
+
+st.sidebar.divider()
 
 # --- LÓGICA DE PROCESSAMENTO ---
 
@@ -111,16 +164,26 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                     try: valor = float(vr_rubr)
                     except: valor = 0.00
                     
-                    if cod_rubr in rubricas_conhecidas: tipo_final = rubricas_conhecidas[cod_rubr]
+                    # Lógica de Classificação e Nomeação
+                    nome_final = ""
+                    if cod_rubr in rubricas_conhecidas: 
+                        tipo_final = rubricas_conhecidas[cod_rubr]['tipo']
+                        nome_final = rubricas_conhecidas[cod_rubr]['nome_personalizado']
                     else:
                         tipo_final = estimar_tipo_rubrica_inicial(cod_rubr)
-                        novas_rubricas[cod_rubr] = tipo_final 
-                        rubricas_conhecidas[cod_rubr] = tipo_final 
+                        # Salva na lista de novas para inserir no DB depois
+                        novas_rubricas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
+                        # Atualiza memória local
+                        rubricas_conhecidas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                     
+                    # Se não tiver nome personalizado, usa o código como fallback visual
+                    display_name = nome_final if nome_final else cod_rubr
+
                     data_rows.append({
                         "Competencia": per_apur,
                         "CPF": cpf_val,
                         "Rubrica": cod_rubr,
+                        "Descrição": display_name, # Nova coluna para visualização
                         "Tipo": tipo_final,
                         "Valor": valor
                     })
@@ -132,8 +195,7 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
 rubricas_db = carregar_rubricas_db()
 funcionarios_db = carregar_funcionarios_db()
 
-# Barra Lateral de Upload
-st.sidebar.header("📂 Arquivos")
+st.sidebar.header("📂 Arquivos eSocial")
 uploaded_file = st.sidebar.file_uploader("Upload ZIP/XML", type=["zip", "xml"], accept_multiple_files=True)
 
 if uploaded_file:
@@ -159,21 +221,24 @@ if uploaded_file:
             novas_rubricas_geral = {}
             cpfs_geral = set()
             
+            # Passa uma cópia das rubricas para não corromper a leitura durante o loop
             for fname, fcontent in files_to_process:
                 rows, novas_r, cpfs = process_xml_file(fcontent, fname, rubricas_db.copy())
                 all_data.extend(rows)
                 novas_rubricas_geral.update(novas_r)
                 cpfs_geral.update(cpfs)
 
-            # Atualização DB
+            # 1. Salvar Novas Rubricas no DB
             if novas_rubricas_geral:
                 conn = get_db_connection()
                 c = conn.cursor()
-                for cod, tipo in novas_rubricas_geral.items():
-                    c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo) VALUES (?, ?)", (cod, tipo))
+                for cod, dados in novas_rubricas_geral.items():
+                    c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", 
+                              (cod, dados['tipo'], dados['nome_personalizado']))
                 conn.commit()
                 conn.close()
 
+            # 2. Salvar Novos Funcionários no DB
             conn = get_db_connection()
             c = conn.cursor()
             novos_funcs = 0
@@ -196,7 +261,7 @@ if 'df_bruto' in st.session_state:
     funcionarios_atualizado = carregar_funcionarios_db()
     df = st.session_state['df_bruto'].copy()
     
-    # Merge seguro
+    # Merge Funcionários
     if not funcionarios_atualizado.empty:
         db_temp = funcionarios_atualizado.rename(columns={'cpf': 'CPF'})
         df = df.merge(db_temp, on="CPF", how="left")
@@ -206,118 +271,101 @@ if 'df_bruto' in st.session_state:
         df["nome"] = df["CPF"]
         df["departamento"] = "Geral"
 
-    # --- NOVIDADE: PREPARAÇÃO DE DATAS PARA FILTROS ---
-    # Extrai Ano e Mês da string "YYYY-MM"
+    # Merge para pegar nomes ATUALIZADOS das rubricas (caso o usuário tenha acabado de editar)
+    rubricas_atualizadas = carregar_rubricas_db()
+    
+    # Função auxiliar para atualizar a descrição na visualização
+    def atualizar_descricao(row):
+        cod = row['Rubrica']
+        if cod in rubricas_atualizadas:
+            nome_personalizado = rubricas_atualizadas[cod]['nome_personalizado']
+            if nome_personalizado:
+                return nome_personalizado
+        return cod
+
+    df['Descrição'] = df.apply(atualizar_descricao, axis=1)
+
+    # Filtros de Tempo
     df['Ano'] = df['Competencia'].str.slice(0, 4)
     df['Mes'] = df['Competencia'].str.slice(5, 7)
 
-    # --- FILTROS LATERAIS (SIDEBAR) ---
     st.sidebar.divider()
-    st.sidebar.header("📅 Filtros de Período")
-    
+    st.sidebar.header("📅 Filtros")
     anos_disponiveis = sorted(df['Ano'].unique())
     meses_disponiveis = sorted(df['Mes'].unique())
+    anos_sel = st.sidebar.multiselect("Anos", anos_disponiveis, default=anos_disponiveis)
+    meses_sel = st.sidebar.multiselect("Meses", meses_disponiveis, default=meses_disponiveis)
     
-    # Por padrão, seleciona todos
-    anos_sel = st.sidebar.multiselect("Selecione os Anos", anos_disponiveis, default=anos_disponiveis)
-    meses_sel = st.sidebar.multiselect("Selecione os Meses", meses_disponiveis, default=meses_disponiveis)
-    
-    # Aplica filtro ao DataFrame Principal
     df_filtrado = df[df['Ano'].isin(anos_sel) & df['Mes'].isin(meses_sel)]
     
     if df_filtrado.empty:
-        st.warning("Nenhum dado encontrado para o período selecionado.")
+        st.warning("Nenhum dado encontrado para o período.")
     else:
-        # Tabs
-        tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial (Acumulado)", "👤 Contracheques", "⚙️ Configurações"])
+        tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações"])
 
         with tab1:
-            st.subheader(f"Resumo Financeiro ({', '.join(anos_sel)})")
-            
+            st.subheader(f"Resumo Financeiro")
             deptos = ["Todos"] + list(df_filtrado["departamento"].unique())
-            filtro_depto = st.selectbox("Filtrar por Departamento:", deptos)
-            
+            filtro_depto = st.selectbox("Filtrar Departamento:", deptos)
             df_view = df_filtrado if filtro_depto == "Todos" else df_filtrado[df_filtrado["departamento"] == filtro_depto]
             
-            # Opção de Visão: Por Competência ou Total Acumulado
-            visao_agrupamento = st.radio("Agrupar valores por:", ["Mês a Mês (Detalhado)", "Total do Período (Acumulado)"], horizontal=True)
-
-            index_pivot = ["departamento", "Competencia"] if visao_agrupamento == "Mês a Mês (Detalhado)" else ["departamento"]
+            visao_agrupamento = st.radio("Agrupar:", ["Mês a Mês", "Acumulado"], horizontal=True)
+            index_pivot = ["departamento", "Competencia"] if visao_agrupamento == "Mês a Mês" else ["departamento"]
 
             resumo = df_view[df_view["Tipo"].isin(["Provento", "Desconto"])].pivot_table(
-                index=index_pivot, 
-                columns="Tipo", 
-                values="Valor", 
-                aggfunc="sum", 
-                fill_value=0
+                index=index_pivot, columns="Tipo", values="Valor", aggfunc="sum", fill_value=0
             ).reset_index()
             
             if "Desconto" not in resumo.columns: resumo["Desconto"] = 0
             if "Provento" not in resumo.columns: resumo["Provento"] = 0
             resumo["Liquido"] = resumo["Provento"] - resumo["Desconto"]
             
-            # Totais Gerais no topo
-            col_t1, col_t2, col_t3 = st.columns(3)
-            col_t1.metric("Total Proventos Filtrados", f"R$ {resumo['Provento'].sum():,.2f}")
-            col_t2.metric("Total Descontos Filtrados", f"R$ {resumo['Desconto'].sum():,.2f}")
-            col_t3.metric("Líquido Total Filtrados", f"R$ {resumo['Liquido'].sum():,.2f}")
-            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Proventos", f"R$ {resumo['Provento'].sum():,.2f}")
+            c2.metric("Descontos", f"R$ {resumo['Desconto'].sum():,.2f}")
+            c3.metric("Líquido", f"R$ {resumo['Liquido'].sum():,.2f}")
             st.dataframe(resumo.style.format({"Provento": "R$ {:,.2f}", "Desconto": "R$ {:,.2f}", "Liquido": "R$ {:,.2f}"}), use_container_width=True)
 
         with tab2:
             st.subheader("Consulta Individual")
-            st.info("Os dados abaixo respeitam os filtros de Ano/Mês selecionados na barra lateral.")
-
-            col_sel1, col_sel2 = st.columns(2)
-            with col_sel1:
+            c_sel1, c_sel2 = st.columns(2)
+            with c_sel1:
                 opcoes_func = df_filtrado[["CPF", "nome"]].drop_duplicates()
                 opcoes_func["label"] = opcoes_func["nome"].astype(str) + " (" + opcoes_func["CPF"].astype(str) + ")"
-                
                 if not opcoes_func.empty:
-                    func_selecionado = st.selectbox("Selecione o Funcionário:", opcoes_func["label"])
+                    func_selecionado = st.selectbox("Funcionário:", opcoes_func["label"])
                     cpf_selecionado = opcoes_func[opcoes_func["label"] == func_selecionado]["CPF"].values[0]
-                else:
-                    cpf_selecionado = None
-
-            with col_sel2:
+                else: cpf_selecionado = None
+            with c_sel2:
                 if cpf_selecionado:
-                    # Permite selecionar Múltiplas competências para ver um resumo do funcionário
                     comps = sorted(df_filtrado[df_filtrado["CPF"] == cpf_selecionado]["Competencia"].unique())
-                    # Por padrão, seleciona a última disponível
                     default_comp = [comps[-1]] if comps else []
-                    comps_selecionadas = st.multiselect("Selecionar Competências (Pode somar várias):", comps, default=default_comp)
-                else:
-                    comps_selecionadas = []
+                    comps_selecionadas = st.multiselect("Competências:", comps, default=default_comp)
+                else: comps_selecionadas = []
             
             if cpf_selecionado and comps_selecionadas:
                 mask = (df_filtrado["CPF"] == cpf_selecionado) & (df_filtrado["Competencia"].isin(comps_selecionadas))
                 df_holerite = df_filtrado[mask].copy()
                 
-                # Agrupa por Rubrica (caso tenha selecionado varios meses, soma a rubrica)
-                df_holerite_agrupado = df_holerite.groupby(["Rubrica", "Tipo"])["Valor"].sum().reset_index()
+                # Agrupa usando a 'Descrição' (Nome do Evento) em vez do código cru
+                df_holerite_agrupado = df_holerite.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index()
                 
                 tot_prov = df_holerite_agrupado[df_holerite_agrupado["Tipo"] == "Provento"]["Valor"].sum()
                 tot_desc = df_holerite_agrupado[df_holerite_agrupado["Tipo"] == "Desconto"]["Valor"].sum()
                 
                 st.divider()
-                st.markdown(f"### 📄 Resumo: {func_selecionado}")
-                st.caption(f"Competências Somadas: {', '.join(comps_selecionadas)}")
-                
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Proventos", f"R$ {tot_prov:,.2f}")
-                c2.metric("Descontos", f"R$ {tot_desc:,.2f}")
-                c3.metric("Líquido", f"R$ {tot_prov - tot_desc:,.2f}")
-                
-                st.table(df_holerite_agrupado[["Rubrica", "Tipo", "Valor"]].style.format({"Valor": "{:.2f}"}))
-            elif not opcoes_func.empty:
-                st.info("Selecione as competências acima para ver os valores.")
+                st.markdown(f"### 📄 {func_selecionado}")
+                col_h1, col_h2, col_h3 = st.columns(3)
+                col_h1.metric("Proventos", f"R$ {tot_prov:,.2f}")
+                col_h2.metric("Descontos", f"R$ {tot_desc:,.2f}")
+                col_h3.metric("Líquido", f"R$ {tot_prov - tot_desc:,.2f}")
+                st.table(df_holerite_agrupado[["Rubrica", "Descrição", "Tipo", "Valor"]].style.format({"Valor": "{:.2f}"}))
 
         with tab3:
             st.header("⚙️ Banco de Dados")
-            
             c1, c2 = st.columns(2)
             with c1:
-                st.subheader("📝 Cadastro de Funcionários")
+                st.subheader("📝 Funcionários")
                 df_funcs = carregar_funcionarios_db()
                 df_funcs_editado = st.data_editor(
                     df_funcs, num_rows="dynamic",
@@ -330,24 +378,26 @@ if 'df_bruto' in st.session_state:
                     st.rerun()
 
             with c2:
-                st.subheader("🏷️ Configuração de Rubricas")
+                st.subheader("🏷️ Rubricas (Eventos)")
                 try: 
                     conn = get_db_connection()
                     df_rubs = pd.read_sql("SELECT * FROM rubricas", conn)
                     conn.close()
-                except: df_rubs = pd.DataFrame(columns=["codigo", "tipo"])
+                except: df_rubs = pd.DataFrame(columns=["codigo", "tipo", "nome_personalizado"])
                 
                 df_rubs_editado = st.data_editor(
                     df_rubs,
                     column_config={
                         "codigo": st.column_config.TextColumn("Cód.", disabled=True),
-                        "tipo": st.column_config.SelectboxColumn("Tipo", options=["Provento", "Desconto", "Informativo"], required=True)
+                        "tipo": st.column_config.SelectboxColumn("Tipo", options=["Provento", "Desconto", "Informativo"], required=True),
+                        # NOVA COLUNA EDITÁVEL
+                        "nome_personalizado": st.column_config.TextColumn("Nome do Evento (Holerite)")
                     },
                     key="editor_rubs"
                 )
                 if st.button("Salvar Rubricas"):
                     salvar_alteracoes_rubricas(df_rubs_editado)
-                    st.success("Salvo!")
+                    st.success("Rubricas atualizadas!")
                     st.rerun()
 else:
-    st.info("👈 Faça o upload dos arquivos XML na barra lateral para começar.")
+    st.info("👈 Faça o upload dos XMLs na barra lateral.")
