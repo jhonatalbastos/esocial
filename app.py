@@ -223,7 +223,6 @@ if uploaded_file:
             conn.close()
             
             if novos_funcs > 0:
-                # CORREÇÃO AQUI: Trocado 'busts_in_silhouette' por '👥'
                 st.toast(f"{novos_funcs} novos funcionários detectados.", icon="👥")
 
             # Salva dados processados na sessão
@@ -237,12 +236,20 @@ if 'df_bruto' in st.session_state:
     
     df = st.session_state['df_bruto'].copy()
     
-    # Merge com segurança (check se funcionarios_atualizado não está vazio)
+    # --- CORREÇÃO DO ERRO KEYERROR ---
+    # Merge com segurança: Renomeia 'cpf' do banco para 'CPF' para bater com o XML
     if not funcionarios_atualizado.empty:
-        df = df.merge(funcionarios_atualizado, on="CPF", how="left")
+        # Cria uma cópia temporária do dataframe do banco com a coluna CPF em maiúsculo
+        db_temp = funcionarios_atualizado.rename(columns={'cpf': 'CPF'})
+        
+        # Faz o merge usando a coluna 'CPF'
+        df = df.merge(db_temp, on="CPF", how="left")
+        
+        # Preenche vazios
         df["nome"] = df["nome"].fillna(df["CPF"]) 
         df["departamento"] = df["departamento"].fillna("Geral")
     else:
+        # Se o banco estiver vazio, cria colunas padrão
         df["nome"] = df["CPF"]
         df["departamento"] = "Geral"
     
@@ -275,7 +282,7 @@ if 'df_bruto' in st.session_state:
         col_sel1, col_sel2 = st.columns(2)
         with col_sel1:
             opcoes_func = df[["CPF", "nome"]].drop_duplicates()
-            # Garante que as colunas sejam strings para concatenação
+            # Garante que as colunas sejam strings
             opcoes_func["label"] = opcoes_func["nome"].astype(str) + " (" + opcoes_func["CPF"].astype(str) + ")"
             
             func_selecionado = st.selectbox("Selecione o Funcionário:", opcoes_func["label"])
