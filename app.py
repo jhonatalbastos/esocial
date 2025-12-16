@@ -5,186 +5,213 @@ import zipfile
 import io
 import re
 
-# Configuração da página
-st.set_page_config(page_title="Leitor eSocial XML 2.0", layout="wide")
+# --- Configuração da Página ---
+st.set_page_config(page_title="Auditoria Folha eSocial", layout="wide", page_icon="📊")
 
-st.title("📂 Extrator de Dados do eSocial (S-1200/S-1210)")
+st.title("📊 Auditoria de Folha eSocial (S-1200)")
 st.markdown("""
-**Versão Corrigida:** Limpeza profunda de namespaces para garantir leitura de arquivos de retorno.
-1. Envie o arquivo **.ZIP** ou XMLs soltos.
-2. O sistema limpará os cabeçalhos para encontrar os dados de remuneração.
+Esta ferramenta processa os XMLs de remuneração, classifica proventos e descontos (estimativa) 
+e gera demonstrativos individuais.
 """)
 
+# --- Funções de Limpeza e Processamento ---
+
 def clean_xml_content(xml_content):
-    """
-    Função robusta para limpar namespaces e prefixos do XML.
-    Isso permite que o Python encontre as tags apenas pelo nome, 
-    independente da versão do eSocial.
-    """
+    """Limpeza profunda de namespaces."""
     try:
-        # 1. Garante que é string
         if isinstance(xml_content, bytes):
             xml_str = xml_content.decode('utf-8', errors='ignore')
         else:
             xml_str = xml_content
-            
-        # 2. Remove declarações de namespace (xmlns="..." e xmlns:prefix="...")
-        # Removemos de forma GLOBAL (sem count=1) para pegar namespaces aninhados
         xml_str = re.sub(r'\sxmlns(:[a-zA-Z0-9]+)?="[^"]+"', '', xml_str)
-        
-        # 3. Remove prefixos de tags (ex: <esocial:evtRemun> vira <evtRemun>)
         xml_str = re.sub(r'<([a-zA-Z0-9]+):', '<', xml_str)
         xml_str = re.sub(r'</([a-zA-Z0-9]+):', '</', xml_str)
-        
         return xml_str
-    except Exception as e:
+    except Exception:
         return xml_content
+
+def estimar_tipo_rubrica(codigo, valor):
+    """
+    Tenta adivinhar se é Provento, Desconto ou Informativo baseada no Código.
+    NOTA: O ideal seria ter a tabela S-1010. Sem ela, usamos heurísticas.
+    """
+    code_upper = str(codigo).upper()
+    
+    # Palavras-chave fortes para Descontos
+    keywords_desc = ['INSS', 'IRRF', 'DESC', 'ADIANT', 'FALT', 'ATRASO', 'RETENCAO', 'VALE', 'VR', 'VT']
+    
+    # Palavras-chave para Bases/Informativos (não somam no líquido)
+    keywords_info = ['BASE', 'FGTS']
+    
+    for k in keywords_info:
+        if k in code_upper:
+            return "Informativo"
+            
+    for k in keywords_desc:
+        if k in code_upper:
+            return "Desconto"
+            
+    # Códigos que começam com 9 costumam ser descontos ou bases em muitos sistemas,
+    # mas nem sempre. Vamos assumir Provento como padrão se não acharmos keywords.
+    return "Provento"
 
 def process_xml_file(file_content, filename):
     data_rows = []
-    
     try:
         clean_xml = clean_xml_content(file_content)
         root = ET.fromstring(clean_xml)
-        
-        # Busca recursiva por 'evtRemun' (S-1200) em qualquer profundidade
         eventos = root.findall(".//evtRemun")
         
-        # Debug: Se não achar, tenta ver se é um S-1210 (Pagamentos) só para avisar
-        if not eventos:
-             # Se quiser expandir no futuro para S-1210, a lógica seria aqui
-             return []
-
         for evt in eventos:
-            # --- Cabeçalho do Evento ---
-            # Busca segura (tenta caminhos diferentes caso a estrutura varie)
             ide_evento = evt.find("ideEvento")
-            per_apur = ide_evento.find("perApur").text if ide_evento is not None and ide_evento.find("perApur") is not None else "N/A"
+            per_apur = ide_evento.find("perApur").text if ide_evento is not None else "N/A"
             
             ide_trab = evt.find("ideTrabalhador")
-            cpf_val = ide_trab.find("cpfTrab").text if ide_trab is not None and ide_trab.find("cpfTrab") is not None else "N/A"
+            cpf_val = ide_trab.find("cpfTrab").text if ide_trab is not None else "N/A"
             
-            # --- Loop pelos Demonstrativos (ideDmDev) ---
-            # Um XML pode ter múltiplos demonstrativos (Ex: Férias + Salário)
             demonstrativos = evt.findall(".//dmDev")
             
             for dm in demonstrativos:
-                ide_dm = dm.find("ideDmDev")
-                id_demo = ide_dm.text if ide_dm is not None else ""
+                id_demo = dm.find("ideDmDev").text if dm.find("ideDmDev") is not None else ""
                 
-                # Identifica tipo de folha baseado no ID do demonstrativo
-                tipo_folha = "Outros"
-                if "FO" in id_demo: tipo_folha = "Mensal"       # Folha Normal
-                elif "FE" in id_demo: tipo_folha = "Férias"     # Férias Gozadas
-                elif "FA" in id_demo: tipo_folha = "Ant. Férias" # Férias Anterior
-                elif "13" in id_demo: tipo_folha = "13º Salário"
-
-                # --- Itens de Remuneração (Rubricas) ---
                 itens = dm.findall(".//itensRemun")
-                
                 for item in itens:
                     cod_rubr = item.find("codRubr").text if item.find("codRubr") is not None else ""
-                    
-                    # Valor da rubrica
                     vr_rubr = item.find("vrRubr").text if item.find("vrRubr") is not None else "0.00"
-                    
-                    # Referência (Qtde Horas ou Fator) - Opcional
-                    qtd_rubr = item.find("qtdRubr")
-                    ref_valor = qtd_rubr.text if qtd_rubr is not None else ""
                     
                     try:
                         valor = float(vr_rubr)
                     except:
                         valor = 0.00
+                        
+                    tipo_estimado = estimar_tipo_rubrica(cod_rubr, valor)
 
                     data_rows.append({
-                        "Arquivo": filename,
                         "Competencia": per_apur,
                         "CPF": cpf_val,
-                        "Tipo Folha": tipo_folha,
                         "ID Demonstrativo": id_demo,
-                        "Cod Rubrica": cod_rubr,
-                        "Referencia": ref_valor,
-                        "Valor": valor
+                        "Rubrica": cod_rubr,
+                        "Tipo (Est.)": tipo_estimado,
+                        "Valor": valor,
+                        "Arquivo Origem": filename
                     })
-                    
-    except Exception as e:
-        # print(f"Erro no arquivo {filename}: {e}") # Opcional para debug
+    except Exception:
         return []
-
     return data_rows
 
-# --- Interface ---
-uploaded_file = st.file_uploader("Arraste o arquivo ZIP ou XMLs aqui", 
-                                 type=["zip", "xml"], 
-                                 accept_multiple_files=True)
+# --- Interface Principal ---
 
+uploaded_file = st.file_uploader("📂 Arraste o ZIP ou XMLs do eSocial", type=["zip", "xml"], accept_multiple_files=True)
 all_data = []
 
 if uploaded_file:
-    if st.button("Processar Arquivos"):
-        with st.spinner('Processando...'):
-            
-            # Lógica para múltiplos arquivos ou ZIP
+    if st.button("🚀 Processar Folha"):
+        with st.spinner('Lendo e estruturando dados...'):
             files_to_process = []
-            
-            # Se for lista (multiplos arquivos upados)
             if isinstance(uploaded_file, list):
                 for f in uploaded_file:
-                    if f.name.endswith('.xml'):
-                        files_to_process.append((f.name, f.read()))
+                    if f.name.endswith('.xml'): files_to_process.append((f.name, f.read()))
                     elif f.name.endswith('.zip'):
                         with zipfile.ZipFile(f) as z:
-                            for name in z.namelist():
-                                if name.endswith('.xml'):
-                                    files_to_process.append((name, z.read(name)))
-            
-            # Se for um único arquivo (não lista)
+                            for n in z.namelist(): 
+                                if n.endswith('.xml'): files_to_process.append((n, z.read(n)))
             else:
                 if uploaded_file.name.endswith('.zip'):
                     with zipfile.ZipFile(uploaded_file) as z:
-                        for name in z.namelist():
-                            if name.endswith('.xml'):
-                                files_to_process.append((name, z.read(name)))
-                elif uploaded_file.name.endswith('.xml'):
-                    files_to_process.append((uploaded_file.name, uploaded_file.read()))
+                        for n in z.namelist(): 
+                            if n.endswith('.xml'): files_to_process.append((n, z.read(n)))
+                elif uploaded_file.name.endswith('.xml'): files_to_process.append((uploaded_file.name, uploaded_file.read()))
 
-            # Processamento real
-            progress_bar = st.progress(0)
-            total_files = len(files_to_process)
-            
-            for i, (fname, fcontent) in enumerate(files_to_process):
-                rows = process_xml_file(fcontent, fname)
-                all_data.extend(rows)
-                progress_bar.progress((i + 1) / total_files)
+            for fname, fcontent in files_to_process:
+                all_data.extend(process_xml_file(fcontent, fname))
 
-        # --- Resultados ---
         if all_data:
             df = pd.DataFrame(all_data)
             
-            st.success(f"Sucesso! {len(df)} rubricas extraídas de {total_files} arquivos.")
+            # --- TABS DE VISUALIZAÇÃO ---
+            tab1, tab2, tab3 = st.tabs(["📋 Resumo da Folha", "👤 Contracheques Individuais", "📥 Download"])
             
-            # Preview
-            st.dataframe(df.head(10))
-            
-            # Tabela Dinâmica (Pivot) para visualização rápida
-            if not df.empty:
-                st.subheader("Resumo Rápido (Soma por Rubrica)")
-                pivot = df.groupby(['Competencia', 'Cod Rubrica'])['Valor'].sum().reset_index().sort_values('Valor', ascending=False)
-                st.dataframe(pivot)
+            with tab1:
+                st.subheader("Visão Geral por Competência")
+                # Pivot table para somar Proventos e Descontos
+                resumo = df[df["Tipo (Est.)"].isin(["Provento", "Desconto"])].pivot_table(
+                    index="Competencia", 
+                    columns="Tipo (Est.)", 
+                    values="Valor", 
+                    aggfunc="sum", 
+                    fill_value=0
+                )
+                if "Desconto" not in resumo.columns: resumo["Desconto"] = 0
+                if "Provento" not in resumo.columns: resumo["Provento"] = 0
+                
+                resumo["Líquido Estimado"] = resumo["Provento"] - resumo["Desconto"]
+                st.dataframe(resumo.style.format("R$ {:,.2f}"))
+                
+                st.info("Nota: A classificação entre Provento/Desconto é feita por palavras-chave no código da rubrica (ex: 'INSS', 'DESC'). Verifique os dados.")
 
-            # Download
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='Base_Completa')
-                if not df.empty:
-                    pivot.to_excel(writer, index=False, sheet_name='Resumo_Rubricas')
-            
-            st.download_button(
-                label="📥 Baixar Excel Processado",
-                data=output.getvalue(),
-                file_name="Relatorio_eSocial_S1200.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            with tab2:
+                st.subheader("Visualizador de Contracheque")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    cpfs = df["CPF"].unique()
+                    selected_cpf = st.selectbox("Selecione o CPF:", cpfs)
+                with col2:
+                    comps = df[df["CPF"] == selected_cpf]["Competencia"].unique()
+                    selected_comp = st.selectbox("Selecione a Competência:", comps)
+                
+                # Filtrar dados do funcionário
+                mask = (df["CPF"] == selected_cpf) & (df["Competencia"] == selected_comp)
+                df_func = df[mask]
+                
+                # Separar totais
+                total_prov = df_func[df_func["Tipo (Est.)"] == "Provento"]["Valor"].sum()
+                total_desc = df_func[df_func["Tipo (Est.)"] == "Desconto"]["Valor"].sum()
+                total_liq = total_prov - total_desc
+                
+                # Exibir Card estilo Contracheque
+                st.divider()
+                st.markdown(f"### 📄 Demonstrativo: {selected_cpf}")
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Proventos", f"R$ {total_prov:,.2f}")
+                c2.metric("Total Descontos", f"R$ {total_desc:,.2f}", delta_color="inverse")
+                c3.metric("Líquido a Pagar", f"R$ {total_liq:,.2f}")
+                
+                st.write("**Detalhamento das Rubricas:**")
+                
+                # Tabela colorida
+                def color_rows(val):
+                    color = 'red' if val == 'Desconto' else 'green' if val == 'Provento' else 'gray'
+                    return f'color: {color}'
+                
+                st.dataframe(
+                    df_func[["Rubrica", "Tipo (Est.)", "Valor"]].style.applymap(color_rows, subset=['Tipo (Est.)']).format({"Valor": "R$ {:.2f}"}),
+                    use_container_width=True
+                )
+
+            with tab3:
+                st.subheader("Baixar Relatórios")
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Base_Completa')
+                    if not df.empty:
+                        # Criar uma aba de resumo por funcionário
+                        resumo_func = df.pivot_table(
+                            index=["Competencia", "CPF"], 
+                            columns="Tipo (Est.)", 
+                            values="Valor", 
+                            aggfunc="sum",
+                            fill_value=0
+                        ).reset_index()
+                        resumo_func.to_excel(writer, index=False, sheet_name='Resumo_Por_Funcionario')
+                
+                st.download_button(
+                    label="📥 Baixar Planilha Completa (Excel)",
+                    data=output.getvalue(),
+                    file_name="Folha_eSocial_Detalhada.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
         else:
-            st.error("Ainda não foi possível encontrar dados. Verifique se os arquivos são do tipo S-1200 (Remuneração).")
+            st.warning("Nenhum dado encontrado.")
