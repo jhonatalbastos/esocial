@@ -3,177 +3,188 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 import zipfile
 import io
+import re
 
 # Configuração da página
-st.set_page_config(page_title="Leitor eSocial XML", layout="wide")
+st.set_page_config(page_title="Leitor eSocial XML 2.0", layout="wide")
 
 st.title("📂 Extrator de Dados do eSocial (S-1200/S-1210)")
 st.markdown("""
-Esta ferramenta transforma os arquivos **XML** do eSocial em uma planilha Excel organizada.
-1. Faça o download do pacote de eventos no portal eSocial.
-2. Envie o arquivo **.ZIP** ou selecione múltiplos arquivos **.XML** abaixo.
+**Versão Corrigida:** Limpeza profunda de namespaces para garantir leitura de arquivos de retorno.
+1. Envie o arquivo **.ZIP** ou XMLs soltos.
+2. O sistema limpará os cabeçalhos para encontrar os dados de remuneração.
 """)
 
-def remove_namespaces(xml_content):
+def clean_xml_content(xml_content):
     """
-    Remove namespaces do XML para facilitar a busca das tags, 
-    independente da versão do layout do eSocial.
+    Função robusta para limpar namespaces e prefixos do XML.
+    Isso permite que o Python encontre as tags apenas pelo nome, 
+    independente da versão do eSocial.
     """
     try:
-        # Tenta decodificar se for bytes
+        # 1. Garante que é string
         if isinstance(xml_content, bytes):
             xml_str = xml_content.decode('utf-8', errors='ignore')
         else:
             xml_str = xml_content
             
-        # Remove declarações de namespace simples
-        import re
-        xml_str = re.sub(r'\sxmlns="[^"]+"', '', xml_str, count=1)
+        # 2. Remove declarações de namespace (xmlns="..." e xmlns:prefix="...")
+        # Removemos de forma GLOBAL (sem count=1) para pegar namespaces aninhados
+        xml_str = re.sub(r'\sxmlns(:[a-zA-Z0-9]+)?="[^"]+"', '', xml_str)
+        
+        # 3. Remove prefixos de tags (ex: <esocial:evtRemun> vira <evtRemun>)
+        xml_str = re.sub(r'<([a-zA-Z0-9]+):', '<', xml_str)
+        xml_str = re.sub(r'</([a-zA-Z0-9]+):', '</', xml_str)
+        
         return xml_str
     except Exception as e:
         return xml_content
 
 def process_xml_file(file_content, filename):
-    """
-    Processa um único arquivo XML e extrai dados de remuneração (S-1200).
-    """
     data_rows = []
     
     try:
-        # Limpeza básica de namespace para facilitar parsing
-        clean_xml = remove_namespaces(file_content)
+        clean_xml = clean_xml_content(file_content)
         root = ET.fromstring(clean_xml)
         
-        # Como removemos o namespace principal, buscamos as tags diretamente
-        # A estrutura pode variar se for XML puro ou dentro de <retornoProcessamentoDownload>
-        # Vamos buscar recursivamente as tags principais
-        
+        # Busca recursiva por 'evtRemun' (S-1200) em qualquer profundidade
         eventos = root.findall(".//evtRemun")
         
+        # Debug: Se não achar, tenta ver se é um S-1210 (Pagamentos) só para avisar
         if not eventos:
-            # Tenta buscar com namespace curinga ou estrutura direta se a limpeza falhou
-            return []
+             # Se quiser expandir no futuro para S-1210, a lógica seria aqui
+             return []
 
         for evt in eventos:
-            # Dados Gerais
-            per_apur = evt.find(".//ideEvento/perApur")
-            per_apur = per_apur.text if per_apur is not None else "N/A"
+            # --- Cabeçalho do Evento ---
+            # Busca segura (tenta caminhos diferentes caso a estrutura varie)
+            ide_evento = evt.find("ideEvento")
+            per_apur = ide_evento.find("perApur").text if ide_evento is not None and ide_evento.find("perApur") is not None else "N/A"
             
-            cpf = evt.find(".//ideTrabalhador/cpfTrab")
-            cpf_val = cpf.text if cpf is not None else "N/A"
+            ide_trab = evt.find("ideTrabalhador")
+            cpf_val = ide_trab.find("cpfTrab").text if ide_trab is not None and ide_trab.find("cpfTrab") is not None else "N/A"
             
-            # Loop pelos Demonstrativos de Pagamento (ideDmDev)
-            # Um funcionário pode ter Férias (FE) e Folha (FO) no mesmo arquivo
+            # --- Loop pelos Demonstrativos (ideDmDev) ---
+            # Um XML pode ter múltiplos demonstrativos (Ex: Férias + Salário)
             demonstrativos = evt.findall(".//dmDev")
             
             for dm in demonstrativos:
-                ide_dm_dev = dm.find("ideDmDev")
-                id_demo = ide_dm_dev.text if ide_dm_dev is not None else ""
+                ide_dm = dm.find("ideDmDev")
+                id_demo = ide_dm.text if ide_dm is not None else ""
                 
-                # Identifica o tipo pelo código (FO=Folha, FE=Férias, FA=Férias Ant.)
+                # Identifica tipo de folha baseado no ID do demonstrativo
                 tipo_folha = "Outros"
-                if "FO" in id_demo: tipo_folha = "Mensal"
-                elif "FE" in id_demo: tipo_folha = "Férias"
-                elif "FA" in id_demo: tipo_folha = "Antec. Férias"
+                if "FO" in id_demo: tipo_folha = "Mensal"       # Folha Normal
+                elif "FE" in id_demo: tipo_folha = "Férias"     # Férias Gozadas
+                elif "FA" in id_demo: tipo_folha = "Ant. Férias" # Férias Anterior
                 elif "13" in id_demo: tipo_folha = "13º Salário"
 
-                # Itens de Remuneração (Rubricas)
+                # --- Itens de Remuneração (Rubricas) ---
                 itens = dm.findall(".//itensRemun")
                 
                 for item in itens:
                     cod_rubr = item.find("codRubr").text if item.find("codRubr") is not None else ""
+                    
+                    # Valor da rubrica
                     vr_rubr = item.find("vrRubr").text if item.find("vrRubr") is not None else "0.00"
                     
-                    # Tenta converter valor para float
+                    # Referência (Qtde Horas ou Fator) - Opcional
+                    qtd_rubr = item.find("qtdRubr")
+                    ref_valor = qtd_rubr.text if qtd_rubr is not None else ""
+                    
                     try:
                         valor = float(vr_rubr)
                     except:
                         valor = 0.00
 
-                    # Adiciona linha na lista final
                     data_rows.append({
                         "Arquivo": filename,
                         "Competencia": per_apur,
                         "CPF": cpf_val,
-                        "ID Demonstrativo": id_demo,
                         "Tipo Folha": tipo_folha,
+                        "ID Demonstrativo": id_demo,
                         "Cod Rubrica": cod_rubr,
+                        "Referencia": ref_valor,
                         "Valor": valor
                     })
                     
     except Exception as e:
-        # Se der erro em um arquivo, registra para debug mas não para o processo
-        print(f"Erro ao processar {filename}: {e}")
+        # print(f"Erro no arquivo {filename}: {e}") # Opcional para debug
         return []
 
     return data_rows
 
-# --- Interface de Upload ---
-uploaded_file = st.file_uploader("Arraste o arquivo ZIP ou selecione XMLs", 
+# --- Interface ---
+uploaded_file = st.file_uploader("Arraste o arquivo ZIP ou XMLs aqui", 
                                  type=["zip", "xml"], 
                                  accept_multiple_files=True)
 
 all_data = []
 
 if uploaded_file:
-    # Botão para iniciar processamento
     if st.button("Processar Arquivos"):
-        with st.spinner('Lendo arquivos... Isso pode levar alguns instantes.'):
+        with st.spinner('Processando...'):
             
-            # Caso 1: Usuário enviou múltiplos XMLs soltos
+            # Lógica para múltiplos arquivos ou ZIP
+            files_to_process = []
+            
+            # Se for lista (multiplos arquivos upados)
             if isinstance(uploaded_file, list):
-                for file in uploaded_file:
-                    if file.name.endswith(".xml"):
-                        content = file.read()
-                        rows = process_xml_file(content, file.name)
-                        all_data.extend(rows)
+                for f in uploaded_file:
+                    if f.name.endswith('.xml'):
+                        files_to_process.append((f.name, f.read()))
+                    elif f.name.endswith('.zip'):
+                        with zipfile.ZipFile(f) as z:
+                            for name in z.namelist():
+                                if name.endswith('.xml'):
+                                    files_to_process.append((name, z.read(name)))
             
-            # Caso 2: Usuário enviou um único arquivo (pode ser ZIP ou XML único)
+            # Se for um único arquivo (não lista)
             else:
-                if uploaded_file.name.endswith(".zip"):
+                if uploaded_file.name.endswith('.zip'):
                     with zipfile.ZipFile(uploaded_file) as z:
-                        for filename in z.namelist():
-                            if filename.endswith(".xml"):
-                                with z.open(filename) as f:
-                                    content = f.read()
-                                    rows = process_xml_file(content, filename)
-                                    all_data.extend(rows)
-                elif uploaded_file.name.endswith(".xml"):
-                    content = uploaded_file.read()
-                    rows = process_xml_file(content, uploaded_file.name)
-                    all_data.extend(rows)
+                        for name in z.namelist():
+                            if name.endswith('.xml'):
+                                files_to_process.append((name, z.read(name)))
+                elif uploaded_file.name.endswith('.xml'):
+                    files_to_process.append((uploaded_file.name, uploaded_file.read()))
 
-        # --- Exibição dos Resultados ---
+            # Processamento real
+            progress_bar = st.progress(0)
+            total_files = len(files_to_process)
+            
+            for i, (fname, fcontent) in enumerate(files_to_process):
+                rows = process_xml_file(fcontent, fname)
+                all_data.extend(rows)
+                progress_bar.progress((i + 1) / total_files)
+
+        # --- Resultados ---
         if all_data:
             df = pd.DataFrame(all_data)
             
-            # Formatação visual
-            st.success(f"Processamento concluído! {len(all_data)} registros encontrados.")
+            st.success(f"Sucesso! {len(df)} rubricas extraídas de {total_files} arquivos.")
             
-            st.subheader("Prévia dos Dados")
-            st.dataframe(df.head(50))
+            # Preview
+            st.dataframe(df.head(10))
             
-            # Resumo por Competência e Tipo (Pivot Table simples)
-            st.subheader("Resumo por Tipo de Folha")
+            # Tabela Dinâmica (Pivot) para visualização rápida
             if not df.empty:
-                resumo = df.groupby(['Competencia', 'Tipo Folha'])['Valor'].sum().reset_index()
-                st.dataframe(resumo)
+                st.subheader("Resumo Rápido (Soma por Rubrica)")
+                pivot = df.groupby(['Competencia', 'Cod Rubrica'])['Valor'].sum().reset_index().sort_values('Valor', ascending=False)
+                st.dataframe(pivot)
 
-            # --- Botão de Download ---
+            # Download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='Detalhado')
+                df.to_excel(writer, index=False, sheet_name='Base_Completa')
                 if not df.empty:
-                    resumo.to_excel(writer, index=False, sheet_name='Resumo')
+                    pivot.to_excel(writer, index=False, sheet_name='Resumo_Rubricas')
             
             st.download_button(
-                label="📥 Baixar Planilha Excel Completa",
+                label="📥 Baixar Excel Processado",
                 data=output.getvalue(),
-                file_name="Folha_eSocial_Consolidada.xlsx",
+                file_name="Relatorio_eSocial_S1200.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.warning("Nenhum dado de remuneração (S-1200) encontrado nos arquivos enviados.")
-
-else:
-    st.info("Aguardando upload de arquivos...")
+            st.error("Ainda não foi possível encontrar dados. Verifique se os arquivos são do tipo S-1200 (Remuneração).")
