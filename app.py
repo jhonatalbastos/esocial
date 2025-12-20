@@ -9,9 +9,9 @@ import sqlite3
 # --- Configuração da Página ---
 st.set_page_config(page_title="Gestor eSocial Master", layout="wide", page_icon="🏢")
 
-st.title("🏢 Gestor de Folha eSocial (Persistente)")
+st.title("🏢 Gestor de Folha eSocial (Detalhado)")
 st.markdown("""
-Sistema de auditoria com importação de referências, nomes personalizados e backup.
+Sistema de auditoria com opção de visualizar itens repetidos linha a linha.
 """)
 
 # --- GERENCIAMENTO DO BANCO DE DADOS ---
@@ -19,22 +19,10 @@ Sistema de auditoria com importação de referências, nomes personalizados e ba
 def init_db():
     conn = sqlite3.connect('esocial_db.db')
     c = conn.cursor()
-    # Cria tabelas se não existirem
-    c.execute('''CREATE TABLE IF NOT EXISTS rubricas (
-                    codigo TEXT PRIMARY KEY, 
-                    tipo TEXT,
-                    nome_personalizado TEXT
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS funcionarios (
-                    cpf TEXT PRIMARY KEY, 
-                    nome TEXT, 
-                    departamento TEXT
-                )''')
-    
-    # Migração segura
+    c.execute('''CREATE TABLE IF NOT EXISTS rubricas (codigo TEXT PRIMARY KEY, tipo TEXT, nome_personalizado TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS funcionarios (cpf TEXT PRIMARY KEY, nome TEXT, departamento TEXT)''')
     try: c.execute("ALTER TABLE rubricas ADD COLUMN nome_personalizado TEXT")
     except sqlite3.OperationalError: pass
-
     conn.commit()
     conn.close()
 
@@ -43,13 +31,10 @@ def get_db_connection():
 
 def carregar_rubricas_db():
     conn = get_db_connection()
-    try: 
-        df = pd.read_sql("SELECT * FROM rubricas", conn)
-    except: 
-        df = pd.DataFrame(columns=["codigo", "tipo", "nome_personalizado"])
+    try: df = pd.read_sql("SELECT * FROM rubricas", conn)
+    except: df = pd.DataFrame(columns=["codigo", "tipo", "nome_personalizado"])
     conn.close()
-    if not df.empty:
-        return df.set_index("codigo")[["tipo", "nome_personalizado"]].to_dict('index')
+    if not df.empty: return df.set_index("codigo")[["tipo", "nome_personalizado"]].to_dict('index')
     return {}
 
 def carregar_funcionarios_db():
@@ -64,10 +49,8 @@ def salvar_alteracoes_rubricas(df_edited):
     c = conn.cursor()
     c.execute("DELETE FROM rubricas")
     for index, row in df_edited.iterrows():
-        cod = str(row['codigo'])
-        tipo = str(row['tipo'])
-        nome = str(row['nome_personalizado']) if pd.notna(row['nome_personalizado']) else ""
-        c.execute("INSERT INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (cod, tipo, nome))
+        c.execute("INSERT INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", 
+                  (str(row['codigo']), str(row['tipo']), str(row['nome_personalizado']) if pd.notna(row['nome_personalizado']) else ""))
     conn.commit()
     conn.close()
 
@@ -76,24 +59,19 @@ def salvar_alteracoes_funcionarios(df_edited):
     c = conn.cursor()
     c.execute("DELETE FROM funcionarios")
     for index, row in df_edited.iterrows():
-        cpf = str(row['cpf'])
-        nome = str(row['nome']) if pd.notna(row['nome']) else ""
-        depto = str(row['departamento']) if pd.notna(row['departamento']) else ""
-        c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (cpf, nome, depto))
+        c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", 
+                  (str(row['cpf']), str(row['nome']) if pd.notna(row['nome']) else "", str(row['departamento']) if pd.notna(row['departamento']) else ""))
     conn.commit()
     conn.close()
 
+# --- IMPORTADOR ---
 def importar_referencia_funcionarios(df_ref, col_cpf, col_nome, col_depto):
     conn = get_db_connection()
     c = conn.cursor()
     count = 0
     for _, row in df_ref.iterrows():
-        cpf = str(row[col_cpf])
-        nome = str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else ""
-        depto = str(row[col_depto]) if col_depto and pd.notna(row[col_depto]) else "Geral"
-        
-        # Upsert: Atualiza se existir, insere se não
-        c.execute("INSERT OR REPLACE INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (cpf, nome, depto))
+        c.execute("INSERT OR REPLACE INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", 
+                  (str(row[col_cpf]), str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else "", str(row[col_depto]) if col_depto and pd.notna(row[col_depto]) else "Geral"))
         count += 1
     conn.commit()
     conn.close()
@@ -103,20 +81,12 @@ def importar_referencia_rubricas(df_ref, col_cod, col_nome, col_tipo):
     conn = get_db_connection()
     c = conn.cursor()
     count = 0
-    # Carrega existentes para não perder o 'tipo' se a planilha só tiver 'nome'
     c.execute("SELECT codigo, tipo FROM rubricas")
     existentes = {row[0]: row[1] for row in c.fetchall()}
-
     for _, row in df_ref.iterrows():
         cod = str(row[col_cod])
+        tipo = str(row[col_tipo]) if col_tipo and pd.notna(row[col_tipo]) else existentes.get(cod, "Provento")
         nome = str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else ""
-        
-        # Se a planilha tem coluna de tipo, usa. Se não, tenta manter o que já existe ou define padrão.
-        if col_tipo and pd.notna(row[col_tipo]):
-            tipo = str(row[col_tipo])
-        else:
-            tipo = existentes.get(cod, "Provento") # Padrão se for novo e sem tipo
-
         c.execute("INSERT OR REPLACE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (cod, tipo, nome))
         count += 1
     conn.commit()
@@ -125,21 +95,19 @@ def importar_referencia_rubricas(df_ref, col_cod, col_nome, col_tipo):
 
 init_db()
 
-# --- SIDEBAR (BACKUP) ---
-st.sidebar.header("💾 Backup e Restauração")
-st.sidebar.info("Use isto para salvar seu trabalho antes de fechar.")
-uploaded_db = st.sidebar.file_uploader("Restaurar Backup (.db)", type=["db"])
+# --- SIDEBAR ---
+st.sidebar.header("💾 Backup")
+uploaded_db = st.sidebar.file_uploader("Restaurar .db", type=["db"])
 if uploaded_db:
-    if st.sidebar.button("♻️ Restaurar Dados"):
+    if st.sidebar.button("♻️ Restaurar"):
         with open("esocial_db.db", "wb") as f: f.write(uploaded_db.getbuffer())
-        st.success("Restaurado! Recarregando..."); st.rerun()
-
-if st.sidebar.button("Preparar Download Backup"):
+        st.success("Ok!"); st.rerun()
+if st.sidebar.button("Download Backup"):
     with open("esocial_db.db", "rb") as f: st.sidebar.download_button("⬇️ Baixar .db", f.read(), "esocial_backup.db", "application/x-sqlite3")
 
 st.sidebar.divider()
 
-# --- LÓGICA PROCESSAMENTO XML ---
+# --- XML ---
 def clean_xml_content(xml_content):
     try:
         if isinstance(xml_content, bytes): xml_str = xml_content.decode('utf-8', errors='ignore')
@@ -168,18 +136,33 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
         clean_xml = clean_xml_content(file_content)
         root = ET.fromstring(clean_xml)
         eventos = root.findall(".//evtRemun")
+        
         for evt in eventos:
             ide_evento = evt.find("ideEvento")
             per_apur = ide_evento.find("perApur").text if ide_evento else "N/A"
             ide_trab = evt.find("ideTrabalhador")
             cpf_val = ide_trab.find("cpfTrab").text if ide_trab is not None else "N/A"
             cpfs_encontrados.add(cpf_val)
+
             demonstrativos = evt.findall(".//dmDev")
             for dm in demonstrativos:
+                id_demo = dm.find("ideDmDev").text if dm.find("ideDmDev") is not None else "N/A"
+                
                 itens = dm.findall(".//itensRemun")
+                # Adicionado contador para gerar ID único para linhas repetidas no mesmo demonstrativo
+                idx_item = 0 
                 for item in itens:
+                    idx_item += 1
                     cod_rubr = item.find("codRubr").text if item.find("codRubr") is not None else ""
                     vr_rubr = item.find("vrRubr").text if item.find("vrRubr") is not None else "0.00"
+                    
+                    # --- EXTRAÇÃO DE REFERÊNCIA (Qtd ou Fator) ---
+                    qtd_rubr = item.find("qtdRubr")
+                    fator_rubr = item.find("fatorRubr")
+                    referencia = ""
+                    if qtd_rubr is not None: referencia = qtd_rubr.text
+                    elif fator_rubr is not None: referencia = fator_rubr.text
+                    
                     try: valor = float(vr_rubr)
                     except: valor = 0.00
                     
@@ -193,26 +176,29 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                         rubricas_conhecidas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                     
                     data_rows.append({
+                        "Unique_ID": f"{filename}_{cpf_val}_{id_demo}_{idx_item}", # Garante unicidade
                         "Competencia": per_apur,
                         "CPF": cpf_val,
+                        "ID_Demonstrativo": id_demo,
                         "Rubrica": cod_rubr,
                         "Descrição": nome_final if nome_final else cod_rubr,
+                        "Referencia": referencia,
                         "Tipo": tipo_final,
                         "Valor": valor
                     })
     except: return [], {}, set()
     return data_rows, novas_rubricas, cpfs_encontrados
 
-# --- INTERFACE ---
+# --- APP START ---
 rubricas_db = carregar_rubricas_db()
 funcionarios_db = carregar_funcionarios_db()
 
-st.sidebar.header("📂 Arquivos eSocial")
-uploaded_file = st.sidebar.file_uploader("Upload ZIP/XML", type=["zip", "xml"], accept_multiple_files=True)
+st.sidebar.header("📂 Upload")
+uploaded_file = st.sidebar.file_uploader("ZIP/XML", type=["zip", "xml"], accept_multiple_files=True)
 
 if uploaded_file:
-    if st.sidebar.button("🚀 Processar Arquivos"):
-        with st.spinner('Lendo arquivos...'):
+    if st.sidebar.button("🚀 Processar"):
+        with st.spinner('Processando...'):
             all_data = []
             files_to_process = []
             if isinstance(uploaded_file, list):
@@ -229,40 +215,35 @@ if uploaded_file:
                             if n.endswith('.xml'): files_to_process.append((n, z.read(n)))
                 elif uploaded_file.name.endswith('.xml'): files_to_process.append((uploaded_file.name, uploaded_file.read()))
 
-            novas_rubricas_geral = {}
+            novas_r_geral = {}
             cpfs_geral = set()
-            rubricas_memoria = rubricas_db.copy()
+            r_memoria = rubricas_db.copy()
 
             for fname, fcontent in files_to_process:
-                rows, novas_r, cpfs = process_xml_file(fcontent, fname, rubricas_memoria)
+                rows, nr, cpfs = process_xml_file(fcontent, fname, r_memoria)
                 all_data.extend(rows)
-                novas_rubricas_geral.update(novas_r)
-                rubricas_memoria.update(novas_r)
+                novas_r_geral.update(nr)
+                r_memoria.update(nr)
                 cpfs_geral.update(cpfs)
 
-            # Salva Novas Rubricas
-            if novas_rubricas_geral:
+            # Salva Novos
+            if novas_r_geral:
                 conn = get_db_connection()
                 c = conn.cursor()
-                for cod, dados in novas_rubricas_geral.items():
-                    c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", 
-                              (str(cod), str(dados['tipo']), str(dados['nome_personalizado'])))
-                conn.commit()
-                conn.close()
+                for cod, dados in novas_r_geral.items():
+                    c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (str(cod), str(dados['tipo']), str(dados['nome_personalizado'])))
+                conn.commit(); conn.close()
 
-            # Salva Novos Funcionários
-            conn = get_db_connection()
-            c = conn.cursor()
-            novos_funcs = 0
+            conn = get_db_connection(); c = conn.cursor()
+            nf = 0
             for cpf in cpfs_geral:
                 c.execute("SELECT cpf FROM funcionarios WHERE cpf = ?", (str(cpf),))
                 if not c.fetchone():
                     c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (str(cpf), "", "Geral"))
-                    novos_funcs += 1
-            conn.commit()
-            conn.close()
+                    nf += 1
+            conn.commit(); conn.close()
             
-            if novos_funcs > 0: st.toast(f"{novos_funcs} novos funcionários.", icon="👥")
+            if nf > 0: st.toast(f"{nf} novos funcs.", icon="👥")
             st.session_state['df_bruto'] = pd.DataFrame(all_data)
             st.rerun()
 
@@ -275,152 +256,132 @@ if 'df_bruto' in st.session_state:
         df['CPF'] = df['CPF'].astype(str)
         db_temp['CPF'] = db_temp['CPF'].astype(str)
         df = df.merge(db_temp, on="CPF", how="left")
-        df["nome"] = df["nome"].fillna(df["CPF"]) 
-        df["departamento"] = df["departamento"].fillna("Geral")
-    else:
-        df["nome"] = df["CPF"]; df["departamento"] = "Geral"
+        df["nome"] = df["nome"].fillna(df["CPF"]); df["departamento"] = df["departamento"].fillna("Geral")
+    else: df["nome"] = df["CPF"]; df["departamento"] = "Geral"
 
-    rubricas_atualizadas = carregar_rubricas_db()
+    rubricas_at = carregar_rubricas_db()
     def atualizar_descricao(row):
         cod = str(row['Rubrica'])
-        if cod in rubricas_atualizadas:
-            nome_personalizado = rubricas_atualizadas[cod]['nome_personalizado']
-            if nome_personalizado: return nome_personalizado
+        if cod in rubricas_at:
+            nm = rubricas_at[cod]['nome_personalizado']
+            if nm: return nm
         return cod
     df['Descrição'] = df.apply(atualizar_descricao, axis=1)
     df['Ano'] = df['Competencia'].str.slice(0, 4)
     df['Mes'] = df['Competencia'].str.slice(5, 7)
 
-    st.sidebar.divider()
-    st.sidebar.header("📅 Filtros")
-    anos_disp = sorted(df['Ano'].dropna().unique())
-    meses_disp = sorted(df['Mes'].dropna().unique())
-    anos_sel = st.sidebar.multiselect("Anos", anos_disp, default=anos_disp)
-    meses_sel = st.sidebar.multiselect("Meses", meses_disp, default=meses_disp)
-    df_filtrado = df[df['Ano'].isin(anos_sel) & df['Mes'].isin(meses_sel)]
+    st.sidebar.divider(); st.sidebar.header("📅 Filtros")
+    anos_d = sorted(df['Ano'].dropna().unique())
+    meses_d = sorted(df['Mes'].dropna().unique())
+    anos_s = st.sidebar.multiselect("Anos", anos_d, default=anos_d)
+    meses_s = st.sidebar.multiselect("Meses", meses_d, default=meses_d)
+    df_f = df[df['Ano'].isin(anos_s) & df['Mes'].isin(meses_s)]
     
     tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações"])
 
     with tab1:
         st.subheader("Resumo Financeiro")
-        deptos = ["Todos"] + list(df_filtrado["departamento"].unique())
-        filtro_depto = st.selectbox("Filtrar Departamento:", deptos)
-        df_view = df_filtrado if filtro_depto == "Todos" else df_filtrado[df_filtrado["departamento"] == filtro_depto]
+        deptos = ["Todos"] + list(df_f["departamento"].unique())
+        f_depto = st.selectbox("Depto:", deptos)
+        df_v = df_f if f_depto == "Todos" else df_f[df_f["departamento"] == f_depto]
         
-        visao = st.radio("Agrupar:", ["Mês a Mês", "Acumulado"], horizontal=True)
-        idx = ["departamento", "Competencia"] if visao == "Mês a Mês" else ["departamento"]
+        vis = st.radio("Agrupar:", ["Mês a Mês", "Acumulado"], horizontal=True)
+        idx = ["departamento", "Competencia"] if vis == "Mês a Mês" else ["departamento"]
         
-        resumo = df_view[df_view["Tipo"].isin(["Provento", "Desconto"])].pivot_table(
-            index=idx, columns="Tipo", values="Valor", aggfunc="sum", fill_value=0
-        ).reset_index()
-        
-        if "Desconto" not in resumo.columns: resumo["Desconto"] = 0
-        if "Provento" not in resumo.columns: resumo["Provento"] = 0
-        resumo["Liquido"] = resumo["Provento"] - resumo["Desconto"]
+        res = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].pivot_table(index=idx, columns="Tipo", values="Valor", aggfunc="sum", fill_value=0).reset_index()
+        if "Desconto" not in res.columns: res["Desconto"] = 0
+        if "Provento" not in res.columns: res["Provento"] = 0
+        res["Liquido"] = res["Provento"] - res["Desconto"]
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Proventos", f"R$ {resumo['Provento'].sum():,.2f}")
-        c2.metric("Descontos", f"R$ {resumo['Desconto'].sum():,.2f}")
-        c3.metric("Líquido", f"R$ {resumo['Liquido'].sum():,.2f}")
-        st.dataframe(resumo.style.format({"Provento": "R$ {:,.2f}", "Desconto": "R$ {:,.2f}", "Liquido": "R$ {:,.2f}"}), use_container_width=True)
+        c1.metric("Proventos", f"R$ {res['Provento'].sum():,.2f}")
+        c2.metric("Descontos", f"R$ {res['Desconto'].sum():,.2f}")
+        c3.metric("Líquido", f"R$ {res['Liquido'].sum():,.2f}")
+        st.dataframe(res.style.format({"Provento": "R$ {:,.2f}", "Desconto": "R$ {:,.2f}", "Liquido": "R$ {:,.2f}"}), use_container_width=True)
 
     with tab2:
         st.subheader("Consulta Individual")
         c1, c2 = st.columns(2)
         with c1:
-            opts = df_filtrado[["CPF", "nome"]].drop_duplicates()
-            opts["lbl"] = opts["nome"].astype(str) + " (" + opts["CPF"].astype(str) + ")"
-            func_sel = st.selectbox("Funcionário:", opts["lbl"]) if not opts.empty else None
-            cpf_sel = opts[opts["lbl"] == func_sel]["CPF"].values[0] if func_sel else None
+            opts = df_f[["CPF", "nome"]].drop_duplicates()
+            opts["l"] = opts["nome"].astype(str) + " (" + opts["CPF"].astype(str) + ")"
+            sel_f = st.selectbox("Func:", opts["l"]) if not opts.empty else None
+            sel_cpf = opts[opts["l"] == sel_f]["CPF"].values[0] if sel_f else None
         with c2:
-            if cpf_sel:
-                comps = sorted(df_filtrado[df_filtrado["CPF"] == cpf_sel]["Competencia"].unique())
-                comp_sel = st.multiselect("Competências:", comps, default=[comps[-1]] if comps else [])
-            else: comp_sel = []
+            if sel_cpf:
+                cps = sorted(df_f[df_f["CPF"] == sel_cpf]["Competencia"].unique())
+                sel_cp = st.multiselect("Comp:", cps, default=[cps[-1]] if cps else [])
+            else: sel_cp = []
         
-        if cpf_sel and comp_sel:
-            mask = (df_filtrado["CPF"] == cpf_sel) & (df_filtrado["Competencia"].isin(comp_sel))
-            df_h = df_filtrado[mask].copy()
-            df_g = df_h.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index()
+        # --- NOVA LÓGICA DE AGRUPAMENTO ---
+        agrupar = st.checkbox("Agrupar rubricas repetidas (Somar valores)?", value=True)
+        
+        if sel_cpf and sel_cp:
+            mask = (df_f["CPF"] == sel_cpf) & (df_f["Competencia"].isin(sel_cp))
+            df_h = df_f[mask].copy()
             
-            tot_p = df_g[df_g["Tipo"] == "Provento"]["Valor"].sum()
-            tot_d = df_g[df_g["Tipo"] == "Desconto"]["Valor"].sum()
+            if agrupar:
+                # Agrupa e soma (Lógica antiga)
+                df_show = df_h.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index()
+                df_show["Referencia"] = "-" # Agrupado perde a referencia individual
+            else:
+                # Mostra detalhado linha a linha (Lógica nova)
+                df_show = df_h[["Rubrica", "Descrição", "Referencia", "Tipo", "Valor"]].sort_values("Rubrica")
+
+            tp = df_show[df_show["Tipo"] == "Provento"]["Valor"].sum()
+            td = df_show[df_show["Tipo"] == "Desconto"]["Valor"].sum()
             
             st.divider()
-            st.markdown(f"### {func_sel}")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Proventos", f"R$ {tot_p:,.2f}")
-            col2.metric("Descontos", f"R$ {tot_d:,.2f}")
-            col3.metric("Líquido", f"R$ {tot_p - tot_d:,.2f}")
+            st.markdown(f"### {sel_f}")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Proventos", f"R$ {tp:,.2f}"); k2.metric("Descontos", f"R$ {td:,.2f}"); k3.metric("Líquido", f"R$ {tp - td:,.2f}")
             
-            def color(val): return 'color: red' if val == 'Desconto' else 'color: green' if val == 'Provento' else 'color: black'
-            st.table(df_g[["Rubrica", "Descrição", "Tipo", "Valor"]].style.applymap(color, subset=['Tipo']).format({"Valor": "{:.2f}"}))
+            def cor(v): return 'color: red' if v == 'Desconto' else 'color: green' if v == 'Provento' else 'color: black'
+            st.table(df_show.style.applymap(cor, subset=['Tipo']).format({"Valor": "{:.2f}"}))
 
     with tab3:
-        st.header("⚙️ Banco de Dados")
+        st.header("⚙️ DB & Importação")
         
-        st.subheader("📥 Importar Planilha de Referência")
-        st.markdown("Use sua planilha `.xlsx` ou `.csv` para preencher os nomes de CPFs ou Eventos em massa.")
-        
-        ref_file = st.file_uploader("Upload Planilha de Referência", type=["xlsx", "csv"])
-        
+        st.subheader("Importar Planilha")
+        ref_file = st.file_uploader("Upload Excel/CSV", type=["xlsx", "csv"])
         if ref_file:
             try:
                 if ref_file.name.endswith('.csv'): df_ref = pd.read_csv(ref_file)
                 else: df_ref = pd.read_excel(ref_file)
-                
-                st.success(f"Planilha carregada! {len(df_ref)} linhas.")
+                st.success(f"Lido: {len(df_ref)} linhas.")
                 st.dataframe(df_ref.head(3))
-                
-                tipo_import = st.radio("O que você quer importar?", ["Funcionários (CPF/Nome)", "Rubricas (Códigos/Eventos)"], horizontal=True)
-                
+                tipo = st.radio("Tipo:", ["Funcionários", "Rubricas"], horizontal=True)
                 cols = df_ref.columns.tolist()
                 
-                if "Funcionários" in tipo_import:
+                if "Func" in tipo:
                     c1, c2, c3 = st.columns(3)
-                    col_cpf = c1.selectbox("Coluna CPF:", cols)
-                    col_nome = c2.selectbox("Coluna Nome:", ["(Ignorar)"] + cols)
-                    col_depto = c3.selectbox("Coluna Departamento:", ["(Ignorar)"] + cols)
-                    
-                    if st.button("Importar Funcionários"):
-                        n_col = col_nome if col_nome != "(Ignorar)" else None
-                        d_col = col_depto if col_depto != "(Ignorar)" else None
-                        qtd = importar_referencia_funcionarios(df_ref, col_cpf, n_col, d_col)
-                        st.success(f"{qtd} funcionários atualizados!")
-                        st.rerun()
-                        
+                    cc = c1.selectbox("Col CPF:", cols)
+                    cn = c2.selectbox("Col Nome:", ["(Ignorar)"] + cols)
+                    cd = c3.selectbox("Col Depto:", ["(Ignorar)"] + cols)
+                    if st.button("Importar Funcs"):
+                        importar_referencia_funcionarios(df_ref, cc, cn if cn!="(Ignorar)" else None, cd if cd!="(Ignorar)" else None)
+                        st.success("Feito!"); st.rerun()
                 else:
                     c1, c2, c3 = st.columns(3)
-                    col_cod = c1.selectbox("Coluna Código Rubrica:", cols)
-                    col_nome = c2.selectbox("Coluna Nome do Evento:", ["(Ignorar)"] + cols)
-                    col_tipo = c3.selectbox("Coluna Tipo (Provento/Desconto):", ["(Ignorar)"] + cols)
-                    
+                    cc = c1.selectbox("Col Cód:", cols)
+                    cn = c2.selectbox("Col Nome:", ["(Ignorar)"] + cols)
+                    ct = c3.selectbox("Col Tipo:", ["(Ignorar)"] + cols)
                     if st.button("Importar Rubricas"):
-                        n_col = col_nome if col_nome != "(Ignorar)" else None
-                        t_col = col_tipo if col_tipo != "(Ignorar)" else None
-                        qtd = importar_referencia_rubricas(df_ref, col_cod, n_col, t_col)
-                        st.success(f"{qtd} rubricas atualizadas!")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao ler arquivo: {e}")
+                        importar_referencia_rubricas(df_ref, cc, cn if cn!="(Ignorar)" else None, ct if ct!="(Ignorar)" else None)
+                        st.success("Feito!"); st.rerun()
+            except Exception as e: st.error(f"Erro: {e}. (Verifique se openpyxl está no requirements.txt)")
 
         st.divider()
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("📝 Editar Funcionários")
-            df_f = carregar_funcionarios_db()
-            df_f_ed = st.data_editor(df_f, num_rows="dynamic", key="ed_f")
-            if st.button("Salvar Funcionários"):
-                salvar_alteracoes_funcionarios(df_f_ed); st.success("Salvo!"); st.rerun()
+            st.subheader("Funcionários")
+            df_f_ed = st.data_editor(carregar_funcionarios_db(), num_rows="dynamic", key="ed_f")
+            if st.button("Salvar F"): salvar_alteracoes_funcionarios(df_f_ed); st.success("Salvo"); st.rerun()
         with c2:
-            st.subheader("🏷️ Editar Rubricas")
-            df_r = carregar_rubricas_db()
-            # Converte dicionário para DF para edição
-            df_r_view = pd.DataFrame.from_dict(df_r, orient='index').reset_index().rename(columns={'index': 'codigo'})
+            st.subheader("Rubricas")
+            df_r_view = pd.DataFrame.from_dict(carregar_rubricas_db(), orient='index').reset_index().rename(columns={'index': 'codigo'})
             if df_r_view.empty: df_r_view = pd.DataFrame(columns=['codigo', 'tipo', 'nome_personalizado'])
-            
             df_r_ed = st.data_editor(df_r_view, key="ed_r")
-            if st.button("Salvar Rubricas"):
-                salvar_alteracoes_rubricas(df_r_ed); st.success("Salvo!"); st.rerun()
+            if st.button("Salvar R"): salvar_alteracoes_rubricas(df_r_ed); st.success("Salvo"); st.rerun()
 else:
-    st.info("👈 Comece enviando os XMLs na barra lateral.")
+    st.info("👈 Envie o XML.")
