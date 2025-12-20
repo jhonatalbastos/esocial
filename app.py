@@ -9,7 +9,7 @@ import sqlite3
 st.set_page_config(page_title="Gestor eSocial Universal", layout="wide", page_icon="🏢")
 
 st.title("🏢 Gestor de Folha eSocial")
-st.markdown("Auditoria de Folha com Identificação de 13º Salário.")
+st.markdown("Auditoria de Folha com Leitura Universal e Importação via Letras (Excel).")
 
 # --- BANCO DE DADOS ---
 def init_db():
@@ -69,6 +69,14 @@ def importar_referencia_rubricas(df_ref, col_cod, col_nome, col_tipo):
 
 init_db()
 
+# --- HELPER: LETRAS EXCEL ---
+def get_col_letter(n):
+    string = ""
+    while n >= 0:
+        string = chr(n % 26 + 65) + string
+        n = n // 26 - 1
+    return string
+
 # --- BACKUP ---
 st.sidebar.header("💾 Backup")
 udb = st.sidebar.file_uploader("Restaurar .db", type=["db"])
@@ -102,11 +110,9 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
             per_apur = safe_find_text(evt, 'perApur') or "N/A"
             competencias_arquivo.add(per_apur)
             
-            # --- DETECÇÃO DE 13º SALÁRIO ---
-            # indApuracao: 1=Mensal, 2=Anual(13º)
+            # 13º Salário Check
             ind_apuracao = safe_find_text(evt, 'indApuracao')
             tipo_folha_desc = "Mensal"
-            
             if ind_apuracao == '2' or (per_apur and per_apur.endswith('-13')):
                 tipo_folha_desc = "13º Salário (Anual)"
             
@@ -156,7 +162,7 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                     data_rows.append({
                         "Unique_ID": f"{filename}_{cpf_val}_{id_demo}_{idx_item}_{cod_rubr}",
                         "Competencia": per_apur,
-                        "Tipo_Folha": tipo_folha_desc, # Nova Coluna
+                        "Tipo_Folha": tipo_folha_desc,
                         "CPF": cpf_val,
                         "ID_Demonstrativo": id_demo,
                         "Rubrica": cod_rubr,
@@ -260,7 +266,6 @@ if 'df_bruto' in st.session_state:
     anos_s = st.sidebar.multiselect("Anos", anos_d, default=anos_d)
     meses_s = st.sidebar.multiselect("Meses", meses_d, default=meses_d)
     
-    # --- FILTRO TIPO DE FOLHA ---
     tipos_folha = sorted(df['Tipo_Folha'].unique())
     tipo_folha_sel = st.sidebar.multiselect("Tipo de Folha (13º/Mensal)", tipos_folha, default=tipos_folha)
     
@@ -275,7 +280,6 @@ if 'df_bruto' in st.session_state:
         df_v = df_f if f_depto == "Todos" else df_f[df_f["departamento"] == f_depto]
         
         vis = st.radio("Agrupar:", ["Mês a Mês", "Acumulado"], horizontal=True)
-        # Adiciona Tipo_Folha no agrupamento para separar 13º do Mensal
         idx = ["departamento", "Competencia", "Tipo_Folha"] if vis == "Mês a Mês" else ["departamento"]
         
         res = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].pivot_table(index=idx, columns="Tipo", values="Valor", aggfunc="sum", fill_value=0).reset_index()
@@ -299,7 +303,6 @@ if 'df_bruto' in st.session_state:
             sel_cpf = opts[opts["l"] == sel_f]["CPF"].values[0] if sel_f else None
         with c2:
             if sel_cpf:
-                # Mostra a competência E O TIPO DE FOLHA no seletor
                 df_f['Comp_Label'] = df_f['Competencia'] + " (" + df_f['Tipo_Folha'] + ")"
                 cps = sorted(df_f[df_f["CPF"] == sel_cpf]["Comp_Label"].unique())
                 sel_cp_label = st.multiselect("Comp:", cps, default=[cps[-1]] if cps else [])
@@ -336,24 +339,44 @@ if 'df_bruto' in st.session_state:
                 if ref_file.name.endswith('.csv'): df_ref = pd.read_csv(ref_file)
                 else: df_ref = pd.read_excel(ref_file)
                 st.success(f"Lido: {len(df_ref)} linhas.")
-                tipo = st.radio("Tipo:", ["Funcionários", "Rubricas"], horizontal=True)
+                
+                # --- LÓGICA DE LETRAS (A, B, C...) ---
                 cols = df_ref.columns.tolist()
+                map_opcoes = {}
+                display_opts = []
+                for i, col in enumerate(cols):
+                    letra = get_col_letter(i)
+                    label = f"{letra} - {col}"
+                    map_opcoes[label] = col
+                    display_opts.append(label)
+                display_opts_ign = ["(Ignorar)"] + display_opts
+                # -------------------------------------
+
+                tipo = st.radio("Tipo:", ["Funcionários", "Rubricas"], horizontal=True)
                 
                 if "Func" in tipo:
                     c1, c2, c3 = st.columns(3)
-                    cc = c1.selectbox("Col CPF:", cols)
-                    cn = c2.selectbox("Col Nome:", ["(Ignorar)"] + cols)
-                    cd = c3.selectbox("Col Depto:", ["(Ignorar)"] + cols)
+                    s_cpf = c1.selectbox("Col CPF:", display_opts)
+                    s_nome = c2.selectbox("Col Nome:", display_opts_ign)
+                    s_depto = c3.selectbox("Col Depto:", display_opts_ign)
+                    
                     if st.button("Importar Funcs"):
-                        importar_referencia_funcionarios(df_ref, cc, cn if cn!="(Ignorar)" else None, cd if cd!="(Ignorar)" else None)
+                        real_cpf = map_opcoes[s_cpf]
+                        real_nome = map_opcoes[s_nome] if s_nome != "(Ignorar)" else None
+                        real_depto = map_opcoes[s_depto] if s_depto != "(Ignorar)" else None
+                        importar_referencia_funcionarios(df_ref, real_cpf, real_nome, real_depto)
                         st.success("Feito!"); st.rerun()
                 else:
                     c1, c2, c3 = st.columns(3)
-                    cc = c1.selectbox("Col Cód:", cols)
-                    cn = c2.selectbox("Col Nome:", ["(Ignorar)"] + cols)
-                    ct = c3.selectbox("Col Tipo:", ["(Ignorar)"] + cols)
+                    s_cod = c1.selectbox("Col Cód:", display_opts)
+                    s_nome = c2.selectbox("Col Nome:", display_opts_ign)
+                    s_tipo = c3.selectbox("Col Tipo:", display_opts_ign)
+                    
                     if st.button("Importar Rubricas"):
-                        importar_referencia_rubricas(df_ref, cc, cn if cn!="(Ignorar)" else None, ct if ct!="(Ignorar)" else None)
+                        real_cod = map_opcoes[s_cod]
+                        real_nome = map_opcoes[s_nome] if s_nome != "(Ignorar)" else None
+                        real_tipo = map_opcoes[s_tipo] if s_tipo != "(Ignorar)" else None
+                        importar_referencia_rubricas(df_ref, real_cod, real_nome, real_tipo)
                         st.success("Feito!"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}.")
 
