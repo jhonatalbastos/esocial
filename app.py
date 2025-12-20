@@ -9,8 +9,8 @@ import os
 # --- Configuração da Página ---
 st.set_page_config(page_title="Gestor eSocial Contábil", layout="wide", page_icon="🏦")
 
-st.title("🏦 Gestor eSocial: Auditoria & Integração Contábil")
-st.markdown("Auditoria baseada em XMLs individuais com classificação oficial do eSocial.")
+st.title("🏦 Gestor eSocial: Auditoria & Integração Contábil (V18)")
+st.markdown("Classificação oficial baseada em XMLs individuais S-1200.")
 
 # --- BANCO DE DADOS ---
 DB_FILE = 'esocial_pro.db'
@@ -36,19 +36,19 @@ def carregar_dados_db(tabela):
 
 init_db()
 
-# --- LÓGICA DE EXTRAÇÃO XML ---
+# --- LÓGICA DE EXTRAÇÃO XML APERFEIÇOADA ---
 def safe_find(element, tag):
     for node in element.iter():
         if node.tag.endswith(tag): return node.text
     return None
 
-def processar_xml_individual(content):
+def processar_xml_individual(content, filename):
     data = []
     try:
         root = ET.fromstring(content)
         per_apur = safe_find(root, 'perApur')
         cpf = safe_find(root, 'cpfTrab')
-        nome_trab = safe_find(root, 'nmTrab')
+        nome_trab = safe_find(root, 'nmTrab') or filename.replace('.xml', '')
         
         for dm in root.iter():
             if dm.tag.endswith('dmDev'):
@@ -58,32 +58,35 @@ def processar_xml_individual(content):
                         cod = safe_find(item, 'codRubr')
                         valor = float(safe_find(item, 'vrRubr') or 0)
                         ref = safe_find(item, 'qtdRubr') or safe_find(item, 'fatorRubr') or ""
-                        tp_rubr = safe_find(item, 'tpRubr')
+                        tp_rubr = safe_find(item, 'tpRubr') # TAG CHAVE: 1, 2 ou 3
                         
-                        classificacao = "Provento" if tp_rubr == '1' else "Desconto" if tp_rubr == '2' else "Informativo"
+                        # Tradução oficial eSocial
+                        if tp_rubr == '1': classificacao = "Vencimento"
+                        elif tp_rubr == '2': classificacao = "Desconto"
+                        else: classificacao = "Informativo"
 
                         data.append({
-                            "Competencia": per_apur, "CPF": cpf, "Nome_XML": nome_trab,
-                            "ID_Demo": id_demo, "Rubrica": cod, "Referencia": ref,
-                            "Valor": valor, "Tipo_Oficial": classificacao
+                            "Competencia": per_apur, "CPF": cpf, "Nome_Funcionario": nome_trab,
+                            "Tipo_Folha": id_demo, "Rubrica": cod, "Referencia": ref,
+                            "Valor": valor, "Classificação": classificacao
                         })
     except: pass
     return data
 
-# --- SIDEBAR: UPLOAD E BACKUP ---
-st.sidebar.header("📂 Arquivos XML (Fevereiro/2023)")
-files = st.sidebar.file_uploader("Suba os XMLs individuais ou ZIP", type=["xml", "zip"], accept_multiple_files=True)
+# --- BARRA LATERAL ---
+st.sidebar.header("📂 Upload de Arquivos")
+files = st.sidebar.file_uploader("Suba XMLs individuais ou ZIP", type=["xml", "zip"], accept_multiple_files=True)
 
 if files:
-    if st.sidebar.button("🚀 Processar e Auditar"):
+    if st.sidebar.button("🚀 Processar e Classificar"):
         all_rows = []
         for f in files:
             if f.name.endswith('.zip'):
                 with zipfile.ZipFile(f) as z:
                     for name in z.namelist():
-                        if name.endswith('.xml'): all_rows.extend(processar_xml_individual(z.read(name)))
+                        if name.endswith('.xml'): all_rows.extend(processar_xml_individual(z.read(name), name))
             else:
-                all_rows.extend(processar_xml_individual(f.read()))
+                all_rows.extend(processar_xml_individual(f.read(), f.name))
         
         if all_rows:
             st.session_state['df_raw'] = pd.DataFrame(all_rows)
@@ -96,70 +99,64 @@ if 'df_raw' in st.session_state:
     df_r = carregar_dados_db("rubricas")
     df_m = carregar_dados_db("matriz_contabil")
 
-    # Merge para enriquecimento de dados
+    # Merge para enriquecimento
     df_final = df_raw.merge(df_f, left_on='CPF', right_on='cpf', how='left')
     df_final = df_final.merge(df_r[['codigo', 'nome_personalizado']], left_on='Rubrica', right_on='codigo', how='left')
     df_final['Descrição'] = df_final['nome_personalizado'].fillna(df_final['Rubrica'])
-    df_final['Nome_Final'] = df_final['nome'].fillna(df_final['Nome_XML'])
 
-    tab1, tab2, tab3 = st.tabs(["📊 Auditoria de Folha", "🔌 Integração Contábil", "⚙️ Configurações Didáticas"])
+    tab1, tab2, tab3 = st.tabs(["📊 Auditoria de Folha", "🔌 Integração Contábil", "⚙️ Configurações Contábeis"])
 
     with tab1:
-        # --- VERIFICADOR DE AUSÊNCIAS ---
-        cpfs_processados = set(df_final['CPF'].unique())
-        cpfs_cadastrados = set(df_f['cpf'].unique())
-        faltantes = cpfs_cadastrados - cpfs_processados
+        st.subheader("Visualização por Classificação")
+        
+        # Verificador de Contracheques Ausentes
+        cpfs_no_xml = set(df_final['CPF'].dropna().unique())
+        cpfs_no_db = set(df_f['cpf'].dropna().unique())
+        faltantes = cpfs_no_db - cpfs_no_xml
         
         if faltantes:
-            st.error(f"⚠️ Atenção: {len(faltantes)} funcionários do cadastro não possuem XML neste lote.")
-            with st.expander("Ver lista de contracheques não encontrados"):
-                st.write(df_f[df_f['cpf'].isin(faltantes)][['cpf', 'nome', 'departamento']])
-        else:
-            st.success("✅ Todos os funcionários cadastrados foram processados.")
-
-        st.subheader("Resumo Analítico")
-        resumo = df_final.groupby(['Rubrica', 'Descrição', 'Tipo_Oficial'])['Valor'].sum().reset_index()
-        st.dataframe(resumo.pivot_table(index=['Rubrica', 'Descrição'], columns='Tipo_Oficial', values='Valor', fill_value=0), use_container_width=True)
+            st.error(f"⚠️ Atenção: {len(faltantes)} funcionários cadastrados não possuem XML neste lote.")
+            with st.expander("Ver quem está faltando"):
+                st.write(df_f[df_f['cpf'].isin(faltantes)][['cpf', 'nome']])
+        
+        # Resumo Analítico (Vencimentos / Despesas / Informativos)
+        resumo = df_final.pivot_table(index=['Rubrica', 'Descrição'], columns='Classificação', values='Valor', aggfunc='sum', fill_value=0).reset_index()
+        st.dataframe(resumo.style.format({c: "{:.2f}" for c in resumo.columns if c not in ['Rubrica', 'Descrição']}), use_container_width=True)
 
     with tab2:
-        st.subheader("Geração de CSV (Separado por ;)")
-        # Lógica de Matriz Contábil
+        st.subheader("Geração do Arquivo para Contabilidade")
         df_integracao = df_final.merge(df_m, left_on=['centro_custo_cod', 'Rubrica'], right_on=['cc_cod', 'rubrica_cod'], how='left')
         
-        if df_integracao['conta_debito'].isna().any():
-            st.warning("Existem rubricas sem conta contábil definida na matriz.")
-        
-        csv_ready = df_integracao.dropna(subset=['conta_debito'])
+        csv_ready = df_integracao.dropna(subset=['conta_debito', 'conta_credito'])
         if not csv_ready.empty:
             csv_data = csv_ready.groupby(['conta_debito', 'conta_credito', 'centro_custo_cod', 'historico'])['Valor'].sum().reset_index()
+            # Ordenação de 5 dígitos como solicitado
             st.table(csv_data)
-            csv_output = io.StringIO()
-            csv_data.to_csv(csv_output, sep=';', index=False, header=False)
-            st.download_button("📥 Baixar CSV para Contabilidade", csv_output.getvalue(), "folha_contabil.csv", "text/csv")
+            csv_str = csv_data.to_csv(sep=';', index=False, header=False)
+            st.download_button("📥 Baixar CSV Contábil", csv_str, "folha_contabil.csv", "text/csv")
+        else:
+            st.warning("Configure as contas contábeis na aba Configurações para gerar o arquivo.")
 
     with tab3:
-        st.header("Configurações Didáticas")
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.subheader("🏢 Centro de Custos & Funcionários")
-            st.caption("Associe cada CPF ao seu respectivo código de Centro de Custo.")
-            ed_f = st.data_editor(df_f, num_rows="dynamic", key="edf")
-            if st.button("Salvar Cadastro"):
+        st.header("Configurações e De-Para")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("🏢 Centro de Custos")
+            ed_f = st.data_editor(df_f, num_rows="dynamic", key="ed_f_v18")
+            if st.button("Salvar Funcionários/CC"):
                 conn = get_db_connection(); c = conn.cursor(); c.execute("DELETE FROM funcionarios")
                 for _, r in ed_f.iterrows():
                     c.execute("INSERT INTO funcionarios VALUES (?,?,?,?)", (str(r['cpf']), str(r['nome']), str(r['departamento']), str(r['centro_custo_cod'])))
-                conn.commit(); conn.close(); st.success("Salvo!"); st.rerun()
+                conn.commit(); conn.close(); st.rerun()
 
-        with col_b:
-            st.subheader("🧾 Matriz de Classificação Contábil")
-            st.caption("Defina o destino contábil das rubricas por Centro de Custo.")
-            ed_m = st.data_editor(df_m, num_rows="dynamic", key="edm")
-            if st.button("Salvar Matriz"):
+        with c2:
+            st.subheader("🧾 Matriz Contábil por CC")
+            ed_m = st.data_editor(df_m, num_rows="dynamic", key="ed_m_v18")
+            if st.button("Salvar Matriz Contábil"):
                 conn = get_db_connection(); c = conn.cursor(); c.execute("DELETE FROM matriz_contabil")
                 for _, r in ed_m.iterrows():
                     c.execute("INSERT INTO matriz_contabil VALUES (?,?,?,?,?)", (str(r['cc_cod']), str(r['rubrica_cod']), str(r['conta_debito']), str(r['conta_credito']), str(r['historico'])))
-                conn.commit(); conn.close(); st.success("Salvo!"); st.rerun()
+                conn.commit(); conn.close(); st.rerun()
 
 else:
-    st.info("Aguardando upload dos XMLs individuais na barra lateral para iniciar a auditoria.")
+    st.info("Aguardando upload dos XMLs individuais para iniciar.")
