@@ -8,12 +8,10 @@ import sqlite3
 # --- Configuração da Página ---
 st.set_page_config(page_title="Gestor eSocial Universal", layout="wide", page_icon="🏢")
 
-st.title("🏢 Gestor de Folha eSocial (Leitor Universal)")
-st.markdown("""
-Versão 10.0: Busca profunda de tags ignorando namespaces e estrutura rígida.
-""")
+st.title("🏢 Gestor de Folha eSocial")
+st.markdown("Auditoria de Folha com Identificação de 13º Salário.")
 
-# --- BANCO DE DADOS (Igual à versão anterior) ---
+# --- BANCO DE DADOS ---
 def init_db():
     conn = sqlite3.connect('esocial_db.db')
     c = conn.cursor()
@@ -82,78 +80,67 @@ if st.sidebar.button("Download Backup"):
     with open("esocial_db.db", "rb") as f: st.sidebar.download_button("⬇️ Baixar .db", f.read(), "esocial_backup.db", "application/x-sqlite3")
 st.sidebar.divider()
 
-# --- LÓGICA DE LEITURA UNIVERSAL (SEM REGEX) ---
-
+# --- LÓGICA UNIVERSAL ---
 def safe_find_text(element, tag_suffix):
-    """Busca tag ignorando namespace (ex: encontra 'ns1:cpfTrab' procurando só 'cpfTrab')"""
     for child in element.iter():
-        if child.tag.endswith(tag_suffix):
-            return child.text
+        if child.tag.endswith(tag_suffix): return child.text
     return None
 
 def process_xml_file(file_content, filename, rubricas_conhecidas):
     data_rows = []
     novas_rubricas = {} 
     cpfs_encontrados = set()
+    competencias_arquivo = set()
 
     try:
-        # Lê o XML puro, sem tentar limpar texto com regex (evita corrupção)
         root = ET.fromstring(file_content)
-        
-        # 1. Encontrar todos os EVENTOS (S-1200) ignorando namespace
         eventos = []
         for elem in root.iter():
-            if elem.tag.endswith('evtRemun'):
-                eventos.append(elem)
+            if elem.tag.endswith('evtRemun'): eventos.append(elem)
         
         for evt in eventos:
-            # Dados do Cabeçalho
             per_apur = safe_find_text(evt, 'perApur') or "N/A"
+            competencias_arquivo.add(per_apur)
+            
+            # --- DETECÇÃO DE 13º SALÁRIO ---
+            # indApuracao: 1=Mensal, 2=Anual(13º)
+            ind_apuracao = safe_find_text(evt, 'indApuracao')
+            tipo_folha_desc = "Mensal"
+            
+            if ind_apuracao == '2' or (per_apur and per_apur.endswith('-13')):
+                tipo_folha_desc = "13º Salário (Anual)"
+            
             cpf_val = safe_find_text(evt, 'cpfTrab') or "N/A"
             cpfs_encontrados.add(cpf_val)
 
-            # 2. Encontrar DEMONSTRATIVOS (dmDev) dentro deste evento
             demonstrativos = []
             for child in evt.iter():
-                if child.tag.endswith('dmDev'):
-                    demonstrativos.append(child)
+                if child.tag.endswith('dmDev'): demonstrativos.append(child)
 
             for dm in demonstrativos:
-                # Tenta pegar o ID do demonstrativo direto no filho imediato para precisão
                 id_demo = "N/A"
                 for child in dm:
                     if child.tag.endswith('ideDmDev'):
-                        id_demo = child.text
-                        break
+                        id_demo = child.text; break
                 
-                # 3. Encontrar RUBRICAS (itensRemun) dentro deste demonstrativo
-                # Usamos .iter() aqui para pegar até as que estão em 'infoPerAnt' (retroativos)
                 itens_no_demonstrativo = []
                 for child in dm.iter():
-                    if child.tag.endswith('itensRemun'):
-                        itens_no_demonstrativo.append(child)
+                    if child.tag.endswith('itensRemun'): itens_no_demonstrativo.append(child)
                 
                 idx_item = 0
                 for item in itens_no_demonstrativo:
                     idx_item += 1
-                    
-                    # Extração segura dos campos
-                    cod_rubr = ""
-                    vr_rubr = "0.00"
-                    referencia = ""
-                    
+                    cod_rubr = ""; vr_rubr = "0.00"; referencia = ""
                     for sub in item:
                         if sub.tag.endswith('codRubr'): cod_rubr = sub.text
                         if sub.tag.endswith('vrRubr'): vr_rubr = sub.text
                         if sub.tag.endswith('qtdRubr'): referencia = sub.text
                         if sub.tag.endswith('fatorRubr'): referencia = sub.text
                     
-                    if not cod_rubr: continue # Pula se não tiver código (sujeira)
-
+                    if not cod_rubr: continue
                     try: valor = float(vr_rubr)
                     except: valor = 0.00
 
-                    # Lógica de Classificação
                     nome_final = ""
                     if cod_rubr in rubricas_conhecidas: 
                         tipo_final = rubricas_conhecidas[cod_rubr]['tipo']
@@ -163,13 +150,13 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                         if any(k in code_upper for k in ['BASE', 'FGTS']): tipo_final = "Informativo"
                         elif any(k in code_upper for k in ['INSS', 'IRRF', 'DESC', 'ADIANT']): tipo_final = "Desconto"
                         else: tipo_final = "Provento"
-                        
                         novas_rubricas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                         rubricas_conhecidas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                     
                     data_rows.append({
                         "Unique_ID": f"{filename}_{cpf_val}_{id_demo}_{idx_item}_{cod_rubr}",
                         "Competencia": per_apur,
+                        "Tipo_Folha": tipo_folha_desc, # Nova Coluna
                         "CPF": cpf_val,
                         "ID_Demonstrativo": id_demo,
                         "Rubrica": cod_rubr,
@@ -178,13 +165,8 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                         "Tipo": tipo_final,
                         "Valor": valor
                     })
-                    
-    except Exception as e:
-        # Em caso de erro grave no arquivo, ignora e segue pro próximo
-        print(f"Erro XML: {e}")
-        return [], {}, set()
-        
-    return data_rows, novas_rubricas, cpfs_encontrados
+    except Exception as e: print(f"Erro XML: {e}"); return [], {}, set(), set()
+    return data_rows, novas_rubricas, cpfs_encontrados, competencias_arquivo
 
 # --- INTERFACE ---
 rubricas_db = carregar_rubricas_db()
@@ -214,14 +196,16 @@ if uploaded_file:
 
             novas_r_geral = {}
             cpfs_geral = set()
+            comps_geral = set()
             r_memoria = rubricas_db.copy()
 
             for fname, fcontent in files_to_process:
-                rows, nr, cpfs = process_xml_file(fcontent, fname, r_memoria)
+                rows, nr, cpfs, comps = process_xml_file(fcontent, fname, r_memoria)
                 all_data.extend(rows)
                 novas_r_geral.update(nr)
                 r_memoria.update(nr)
                 cpfs_geral.update(cpfs)
+                comps_geral.update(comps)
 
             if novas_r_geral:
                 conn = get_db_connection(); c = conn.cursor()
@@ -236,11 +220,18 @@ if uploaded_file:
                     c.execute("INSERT INTO funcionarios VALUES (?, ?, ?)", (str(cpf), "", "Geral")); nf += 1
             conn.commit(); conn.close()
             
-            if nf > 0: st.toast(f"{nf} novos funcs.", icon="👥")
             st.session_state['df_bruto'] = pd.DataFrame(all_data)
+            st.session_state['comps_encontradas'] = sorted(list(comps_geral))
             st.rerun()
 
+# --- EXIBIÇÃO ---
 if 'df_bruto' in st.session_state:
+    comps_encontradas = st.session_state.get('comps_encontradas', [])
+    if comps_encontradas:
+        st.success(f"✅ Arquivos processados! Competências: **{', '.join(comps_encontradas)}**")
+    else:
+        st.warning("⚠️ Nenhuma competência identificada.")
+
     funcionarios_atualizado = carregar_funcionarios_db()
     df = st.session_state['df_bruto'].copy()
     
@@ -268,7 +259,12 @@ if 'df_bruto' in st.session_state:
     meses_d = sorted(df['Mes'].dropna().unique())
     anos_s = st.sidebar.multiselect("Anos", anos_d, default=anos_d)
     meses_s = st.sidebar.multiselect("Meses", meses_d, default=meses_d)
-    df_f = df[df['Ano'].isin(anos_s) & df['Mes'].isin(meses_s)]
+    
+    # --- FILTRO TIPO DE FOLHA ---
+    tipos_folha = sorted(df['Tipo_Folha'].unique())
+    tipo_folha_sel = st.sidebar.multiselect("Tipo de Folha (13º/Mensal)", tipos_folha, default=tipos_folha)
+    
+    df_f = df[df['Ano'].isin(anos_s) & df['Mes'].isin(meses_s) & df['Tipo_Folha'].isin(tipo_folha_sel)]
     
     tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações"])
 
@@ -279,7 +275,8 @@ if 'df_bruto' in st.session_state:
         df_v = df_f if f_depto == "Todos" else df_f[df_f["departamento"] == f_depto]
         
         vis = st.radio("Agrupar:", ["Mês a Mês", "Acumulado"], horizontal=True)
-        idx = ["departamento", "Competencia"] if vis == "Mês a Mês" else ["departamento"]
+        # Adiciona Tipo_Folha no agrupamento para separar 13º do Mensal
+        idx = ["departamento", "Competencia", "Tipo_Folha"] if vis == "Mês a Mês" else ["departamento"]
         
         res = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].pivot_table(index=idx, columns="Tipo", values="Valor", aggfunc="sum", fill_value=0).reset_index()
         if "Desconto" not in res.columns: res["Desconto"] = 0
@@ -302,15 +299,16 @@ if 'df_bruto' in st.session_state:
             sel_cpf = opts[opts["l"] == sel_f]["CPF"].values[0] if sel_f else None
         with c2:
             if sel_cpf:
-                cps = sorted(df_f[df_f["CPF"] == sel_cpf]["Competencia"].unique())
-                sel_cp = st.multiselect("Comp:", cps, default=[cps[-1]] if cps else [])
-            else: sel_cp = []
+                # Mostra a competência E O TIPO DE FOLHA no seletor
+                df_f['Comp_Label'] = df_f['Competencia'] + " (" + df_f['Tipo_Folha'] + ")"
+                cps = sorted(df_f[df_f["CPF"] == sel_cpf]["Comp_Label"].unique())
+                sel_cp_label = st.multiselect("Comp:", cps, default=[cps[-1]] if cps else [])
+            else: sel_cp_label = []
         
-        # OPÇÃO DE AGRUPAMENTO (Padrão False para ver TUDO)
         agrupar = st.checkbox("Agrupar rubricas repetidas?", value=False)
         
-        if sel_cpf and sel_cp:
-            mask = (df_f["CPF"] == sel_cpf) & (df_f["Competencia"].isin(sel_cp))
+        if sel_cpf and sel_cp_label:
+            mask = (df_f["CPF"] == sel_cpf) & (df_f["Comp_Label"].isin(sel_cp_label))
             df_h = df_f[mask].copy()
             
             if agrupar:
