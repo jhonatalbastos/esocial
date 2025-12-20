@@ -9,8 +9,8 @@ import os
 # --- Configuração da Página ---
 st.set_page_config(page_title="Gestor eSocial Pro", layout="wide", page_icon="🏢")
 
-st.title("🏢 Gestor de Folha eSocial (Com Relatório Analítico)")
-st.markdown("Sistema com atualização dinâmica e relatórios analíticos por departamento.")
+st.title("🏢 Gestor de Folha eSocial (Blindado)")
+st.markdown("Sistema com proteção contra arquivos corrompidos e tabelas vazias.")
 
 # --- BANCO DE DADOS E PERSISTÊNCIA ---
 DB_FILE = 'esocial_db.db'
@@ -24,7 +24,6 @@ def init_db():
     except sqlite3.OperationalError: pass
     conn.commit(); conn.close()
 
-    # --- AUTO-LOAD DO GITHUB/ARQUIVO LOCAL ---
     if os.path.exists("config_padrao.xlsx"):
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -94,7 +93,7 @@ init_db()
 
 # --- BACKUP E CONFIGURAÇÃO ---
 with st.sidebar.expander("💾 Backup e Persistência", expanded=False):
-    st.info("O Streamlit Cloud reseta o sistema ao reiniciar. Use as opções abaixo.")
+    st.info("Use para salvar/restaurar dados.")
     with open(DB_FILE, "rb") as f:
         st.download_button("⬇️ Baixar Banco de Dados (.db)", f.read(), "esocial_backup.db", "application/x-sqlite3")
     
@@ -169,12 +168,21 @@ def process_xml_file(file_content, filename):
                         "Referencia": referencia,
                         "Valor": valor
                     })
-    except Exception as e: print(f"Erro XML: {e}"); return [], set()
+    except Exception as e: 
+        # Loga o erro mas não para a execução geral
+        print(f"Erro XML ({filename}): {e}")
+        return [], set()
     return data_rows, comps_arquivo
 
-# --- APLICAÇÃO DINÂMICA ---
+# --- APLICAÇÃO DINÂMICA (CORREÇÃO DO ERRO KEYERROR) ---
 def aplicar_configuracoes_dinamicas(df_bruto):
-    if df_bruto.empty: return df_bruto
+    # CORREÇÃO: Se o DataFrame estiver vazio, cria estrutura padrão para não dar erro de coluna
+    if df_bruto.empty:
+        return pd.DataFrame(columns=[
+            "Competencia", "Tipo_Folha", "CPF", "Rubrica", "Referencia", "Valor", 
+            "Tipo", "Descrição", "nome", "departamento", "Ano", "Mes"
+        ])
+    
     df_rubricas_db = carregar_rubricas_db()
     df_funcs_db = carregar_funcionarios_db()
     
@@ -229,7 +237,8 @@ if uploaded_file:
                         with zipfile.ZipFile(f) as z:
                             for n in z.namelist(): 
                                 if n.endswith('.xml'): files.append((n, z.read(n)))
-            else: pass
+            else:
+                pass # Lógica simplificada
 
             comps_total = set()
             rubricas_encontradas = set()
@@ -242,10 +251,12 @@ if uploaded_file:
                 for r in rows:
                     rubricas_encontradas.add(r['Rubrica']); cpfs_encontrados.add(r['CPF'])
 
-            conn = get_db_connection(); c = conn.cursor()
-            for cod in rubricas_encontradas: c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (str(cod), 'Provento', ''))
-            for cpf in cpfs_encontrados: c.execute("INSERT OR IGNORE INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (str(cpf), '', 'Geral'))
-            conn.commit(); conn.close()
+            # Cadastro Automático
+            if rubricas_encontradas:
+                conn = get_db_connection(); c = conn.cursor()
+                for cod in rubricas_encontradas: c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (str(cod), 'Provento', ''))
+                for cpf in cpfs_encontrados: c.execute("INSERT OR IGNORE INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (str(cpf), '', 'Geral'))
+                conn.commit(); conn.close()
 
             st.session_state['df_raw'] = pd.DataFrame(all_data)
             st.session_state['comps_msg'] = sorted(list(comps_total))
@@ -258,129 +269,105 @@ if 'df_raw' in st.session_state:
 
     df_completo = aplicar_configuracoes_dinamicas(st.session_state['df_raw'].copy())
 
-    st.sidebar.divider(); st.sidebar.header("📅 Filtros")
-    anos = sorted(df_completo['Ano'].unique())
-    meses = sorted(df_completo['Mes'].unique())
-    anos_sel = st.sidebar.multiselect("Ano", anos, default=anos)
-    meses_sel = st.sidebar.multiselect("Mês", meses, default=meses)
-    tipos_folha = sorted(df_completo['Tipo_Folha'].unique())
-    tipos_sel = st.sidebar.multiselect("Tipo", tipos_folha, default=tipos_folha)
+    # VERIFICA SE EXISTEM DADOS ANTES DE MONTAR FILTROS
+    if not df_completo.empty and 'Ano' in df_completo.columns:
+        st.sidebar.divider(); st.sidebar.header("📅 Filtros")
+        anos = sorted(df_completo['Ano'].dropna().unique())
+        meses = sorted(df_completo['Mes'].dropna().unique())
+        anos_sel = st.sidebar.multiselect("Ano", anos, default=anos)
+        meses_sel = st.sidebar.multiselect("Mês", meses, default=meses)
+        tipos_folha = sorted(df_completo['Tipo_Folha'].unique())
+        tipos_sel = st.sidebar.multiselect("Tipo", tipos_folha, default=tipos_folha)
 
-    df_filtered = df_completo[df_completo['Ano'].isin(anos_sel) & df_completo['Mes'].isin(meses_sel) & df_completo['Tipo_Folha'].isin(tipos_sel)]
+        df_filtered = df_completo[df_completo['Ano'].isin(anos_sel) & df_completo['Mes'].isin(meses_sel) & df_completo['Tipo_Folha'].isin(tipos_sel)]
 
-    tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações"])
+        tab1, tab2, tab3 = st.tabs(["📊 Visão Gerencial", "👤 Contracheques", "⚙️ Configurações"])
 
-    with tab1:
-        deptos = ["Todos"] + list(df_filtered["departamento"].unique())
-        sel_depto = st.selectbox("Selecione o Departamento para Análise:", deptos)
-        df_v = df_filtered if sel_depto == "Todos" else df_filtered[df_filtered["departamento"] == sel_depto]
-        
-        st.subheader(f"Resumo Financeiro - {sel_depto}")
-        
-        # 1. TOTAIS (CARDS)
-        resumo_geral = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].groupby("Tipo")["Valor"].sum()
-        tot_p = resumo_geral.get("Provento", 0); tot_d = resumo_geral.get("Desconto", 0)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Proventos", f"R$ {tot_p:,.2f}")
-        c2.metric("Total Descontos", f"R$ {tot_d:,.2f}")
-        c3.metric("Líquido", f"R$ {tot_p - tot_d:,.2f}")
-        
-        st.divider()
-        
-        # 2. TABELA ANALÍTICA (ESTILO PDF)
-        st.markdown("### 📋 Detalhamento por Rubrica (Resumo da Folha)")
-        
-        # Filtra apenas proventos e descontos para o relatório
-        df_analitico = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].copy()
-        
-        # Pivot table: Agrupa por Rubrica e Descrição, colunas são Provento/Desconto
-        resumo_rubricas = df_analitico.pivot_table(
-            index=["Rubrica", "Descrição"], 
-            columns="Tipo", 
-            values="Valor", 
-            aggfunc="sum", 
-            fill_value=0
-        ).reset_index()
-
-        # Garante colunas
-        if "Provento" not in resumo_rubricas.columns: resumo_rubricas["Provento"] = 0.0
-        if "Desconto" not in resumo_rubricas.columns: resumo_rubricas["Desconto"] = 0.0
-        
-        # Ordena pelo código da rubrica
-        resumo_rubricas.sort_values("Rubrica", inplace=True)
-
-        # Exibição
-        st.dataframe(
-            resumo_rubricas.style.format({"Provento": "R$ {:,.2f}", "Desconto": "R$ {:,.2f}"}),
-            use_container_width=True,
-            height=500
-        )
-        
-        # Botão de Download do Relatório Analítico
-        output_analitico = io.BytesIO()
-        with pd.ExcelWriter(output_analitico, engine='xlsxwriter') as writer:
-            resumo_rubricas.to_excel(writer, index=False, sheet_name=f"Resumo_{sel_depto[:20]}")
-        
-        st.download_button(
-            label=f"📥 Baixar Resumo Analítico ({sel_depto}) em Excel",
-            data=output_analitico.getvalue(),
-            file_name=f"Resumo_Analitico_{sel_depto}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    with tab2:
-        c1, c2 = st.columns(2)
-        with c1:
-            opts = df_filtered[["CPF", "nome"]].drop_duplicates()
-            opts["label"] = opts["nome"] + " (" + opts["CPF"] + ")"
-            sel_func_l = st.selectbox("Funcionário", opts["label"]) if not opts.empty else None
-            sel_cpf = opts[opts["label"] == sel_func_l]["CPF"].values[0] if sel_func_l else None
-        with c2:
-            if sel_cpf:
-                df_filtered['C_Label'] = df_filtered['Competencia'] + " (" + df_filtered['Tipo_Folha'] + ")"
-                cps = sorted(df_filtered[df_filtered["CPF"] == sel_cpf]["C_Label"].unique())
-                sel_comp = st.multiselect("Competência", cps, default=[cps[-1]] if cps else [])
-            else: sel_comp = []
-
-        agrupar = st.checkbox("Agrupar repetidos (Somar)", value=False)
-        if sel_cpf and sel_comp:
-            df_h = df_filtered[(df_filtered["CPF"] == sel_cpf) & (df_filtered["C_Label"].isin(sel_comp))].copy()
-            if agrupar:
-                df_show = df_h.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index(); df_show["Referencia"] = "-"
-            else:
-                df_show = df_h[["Rubrica", "Descrição", "Referencia", "Tipo", "Valor"]].sort_values("Rubrica")
-            
-            t_p = df_show[df_show["Tipo"] == "Provento"]["Valor"].sum(); t_d = df_show[df_show["Tipo"] == "Desconto"]["Valor"].sum()
-            st.divider(); st.markdown(f"### {sel_func_l}"); k1, k2, k3 = st.columns(3)
-            k1.metric("Proventos", f"R$ {t_p:,.2f}"); k2.metric("Descontos", f"R$ {t_d:,.2f}"); k3.metric("Líquido", f"R$ {t_p - t_d:,.2f}")
-            def color(v): return 'color: red' if v == 'Desconto' else 'color: green' if v == 'Provento' else 'color: black'
-            st.table(df_show.style.applymap(color, subset=['Tipo']).format({"Valor": "{:.2f}"}))
-
-    with tab3:
-        st.header("⚙️ Configurações (Edição Real-Time)")
-        with st.expander("📥 Importar Referência (Excel)", expanded=True):
-            f_ref = st.file_uploader("Arquivo .xlsx", type=["xlsx"])
-            if f_ref:
-                df_ref = pd.read_excel(f_ref); cols = df_ref.columns.tolist()
-                opts_col = [f"{get_col_letter(i)} - {c}" for i, c in enumerate(cols)]; map_idx = {o: c for o, c in zip(opts_col, cols)}
-                t_imp = st.radio("Tipo", ["Funcionários", "Rubricas"], horizontal=True)
+        with tab1:
+            if not df_filtered.empty:
+                deptos = ["Todos"] + list(df_filtered["departamento"].unique())
+                sel_depto = st.selectbox("Selecione o Departamento:", deptos)
+                df_v = df_filtered if sel_depto == "Todos" else df_filtered[df_filtered["departamento"] == sel_depto]
+                
+                resumo_geral = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].groupby("Tipo")["Valor"].sum()
+                tot_p = resumo_geral.get("Provento", 0); tot_d = resumo_geral.get("Desconto", 0)
                 c1, c2, c3 = st.columns(3)
-                if t_imp == "Funcionários":
-                    sc = c1.selectbox("CPF", opts_col); sn = c2.selectbox("Nome", ["(Ignorar)"]+opts_col); sd = c3.selectbox("Depto", ["(Ignorar)"]+opts_col)
-                    if st.button("Importar"):
-                        importar_referencia_xlsx(df_ref, "func", {'cpf': map_idx[sc], 'nome': map_idx[sn] if sn != "(Ignorar)" else None, 'depto': map_idx[sd] if sd != "(Ignorar)" else None})
-                        st.success("Importado!"); st.rerun()
-                else:
-                    sc = c1.selectbox("Código", opts_col); sn = c2.selectbox("Nome Evento", ["(Ignorar)"]+opts_col); st_type = c3.selectbox("Tipo", ["(Ignorar)"]+opts_col)
-                    if st.button("Importar"):
-                        importar_referencia_xlsx(df_ref, "rubr", {'cod': map_idx[sc], 'nome': map_idx[sn] if sn != "(Ignorar)" else None, 'tipo': map_idx[st_type] if st_type != "(Ignorar)" else None})
-                        st.success("Importado!"); st.rerun()
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Funcionários"); ed_f = st.data_editor(carregar_funcionarios_db(), num_rows="dynamic", key="edf")
-            if st.button("Salvar Funcionários"): salvar_alteracoes_funcionarios(ed_f); st.success("Salvo!"); st.rerun()
-        with c2:
-            st.subheader("Rubricas"); ed_r = st.data_editor(carregar_rubricas_db(), num_rows="dynamic", key="edr")
-            if st.button("Salvar Rubricas"): salvar_alteracoes_rubricas(ed_r); st.success("Salvo!"); st.rerun()
+                c1.metric("Total Proventos", f"R$ {tot_p:,.2f}"); c2.metric("Total Descontos", f"R$ {tot_d:,.2f}"); c3.metric("Líquido", f"R$ {tot_p - tot_d:,.2f}")
+                
+                st.divider(); st.markdown("### 📋 Resumo Analítico da Folha")
+                df_analitico = df_v[df_v["Tipo"].isin(["Provento", "Desconto"])].copy()
+                if not df_analitico.empty:
+                    resumo_rubricas = df_analitico.pivot_table(index=["Rubrica", "Descrição"], columns="Tipo", values="Valor", aggfunc="sum", fill_value=0).reset_index()
+                    if "Provento" not in resumo_rubricas.columns: resumo_rubricas["Provento"] = 0.0
+                    if "Desconto" not in resumo_rubricas.columns: resumo_rubricas["Desconto"] = 0.0
+                    resumo_rubricas.sort_values("Rubrica", inplace=True)
+                    st.dataframe(resumo_rubricas.style.format({"Provento": "R$ {:,.2f}", "Desconto": "R$ {:,.2f}"}), use_container_width=True, height=500)
+                    
+                    out_an = io.BytesIO()
+                    with pd.ExcelWriter(out_an, engine='xlsxwriter') as w: resumo_rubricas.to_excel(w, index=False)
+                    st.download_button(f"📥 Baixar Resumo ({sel_depto})", out_an.getvalue(), f"Resumo_{sel_depto}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                else: st.info("Sem dados financeiros para exibir.")
+            else: st.warning("Sem dados para os filtros selecionados.")
+
+        with tab2:
+            if not df_filtered.empty:
+                c1, c2 = st.columns(2)
+                with c1:
+                    opts = df_filtered[["CPF", "nome"]].drop_duplicates()
+                    opts["label"] = opts["nome"] + " (" + opts["CPF"] + ")"
+                    sel_func_l = st.selectbox("Funcionário", opts["label"]) if not opts.empty else None
+                    sel_cpf = opts[opts["label"] == sel_func_l]["CPF"].values[0] if sel_func_l else None
+                with c2:
+                    if sel_cpf:
+                        df_filtered['C_Label'] = df_filtered['Competencia'] + " (" + df_filtered['Tipo_Folha'] + ")"
+                        cps = sorted(df_filtered[df_filtered["CPF"] == sel_cpf]["C_Label"].unique())
+                        sel_comp = st.multiselect("Competência", cps, default=[cps[-1]] if cps else [])
+                    else: sel_comp = []
+
+                agrupar = st.checkbox("Agrupar repetidos", value=False)
+                if sel_cpf and sel_comp:
+                    df_h = df_filtered[(df_filtered["CPF"] == sel_cpf) & (df_filtered["C_Label"].isin(sel_comp))].copy()
+                    if agrupar:
+                        df_show = df_h.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index(); df_show["Referencia"] = "-"
+                    else:
+                        df_show = df_h[["Rubrica", "Descrição", "Referencia", "Tipo", "Valor"]].sort_values("Rubrica")
+                    
+                    t_p = df_show[df_show["Tipo"] == "Provento"]["Valor"].sum(); t_d = df_show[df_show["Tipo"] == "Desconto"]["Valor"].sum()
+                    st.divider(); st.markdown(f"### {sel_func_l}"); k1, k2, k3 = st.columns(3)
+                    k1.metric("Proventos", f"R$ {t_p:,.2f}"); k2.metric("Descontos", f"R$ {t_d:,.2f}"); k3.metric("Líquido", f"R$ {t_p - t_d:,.2f}")
+                    def color(v): return 'color: red' if v == 'Desconto' else 'color: green' if v == 'Provento' else 'color: black'
+                    st.table(df_show.style.applymap(color, subset=['Tipo']).format({"Valor": "{:.2f}"}))
+            else: st.warning("Sem dados.")
+
+        with tab3:
+            st.header("⚙️ Configurações (Edição Real-Time)")
+            with st.expander("📥 Importar Referência (Excel)", expanded=True):
+                f_ref = st.file_uploader("Arquivo .xlsx", type=["xlsx"])
+                if f_ref:
+                    df_ref = pd.read_excel(f_ref); cols = df_ref.columns.tolist()
+                    opts_col = [f"{get_col_letter(i)} - {c}" for i, c in enumerate(cols)]; map_idx = {o: c for o, c in zip(opts_col, cols)}
+                    t_imp = st.radio("Tipo", ["Funcionários", "Rubricas"], horizontal=True)
+                    c1, c2, c3 = st.columns(3)
+                    if t_imp == "Funcionários":
+                        sc = c1.selectbox("CPF", opts_col); sn = c2.selectbox("Nome", ["(Ignorar)"]+opts_col); sd = c3.selectbox("Depto", ["(Ignorar)"]+opts_col)
+                        if st.button("Importar"):
+                            importar_referencia_xlsx(df_ref, "func", {'cpf': map_idx[sc], 'nome': map_idx[sn] if sn != "(Ignorar)" else None, 'depto': map_idx[sd] if sd != "(Ignorar)" else None})
+                            st.success("Importado!"); st.rerun()
+                    else:
+                        sc = c1.selectbox("Código", opts_col); sn = c2.selectbox("Nome Evento", ["(Ignorar)"]+opts_col); st_type = c3.selectbox("Tipo", ["(Ignorar)"]+opts_col)
+                        if st.button("Importar"):
+                            importar_referencia_xlsx(df_ref, "rubr", {'cod': map_idx[sc], 'nome': map_idx[sn] if sn != "(Ignorar)" else None, 'tipo': map_idx[st_type] if st_type != "(Ignorar)" else None})
+                            st.success("Importado!"); st.rerun()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Funcionários"); ed_f = st.data_editor(carregar_funcionarios_db(), num_rows="dynamic", key="edf")
+                if st.button("Salvar Funcionários"): salvar_alteracoes_funcionarios(ed_f); st.success("Salvo!"); st.rerun()
+            with c2:
+                st.subheader("Rubricas"); ed_r = st.data_editor(carregar_rubricas_db(), num_rows="dynamic", key="edr")
+                if st.button("Salvar Rubricas"): salvar_alteracoes_rubricas(ed_r); st.success("Salvo!"); st.rerun()
+    else:
+        st.warning("⚠️ O arquivo processado não contém dados válidos de remuneração (S-1200) ou está vazio.")
+        st.info("Verifique se você subiu o XML correto (Eventos Periódicos S-1200).")
+
 else:
     st.info("👈 Envie seus XMLs para começar.")
