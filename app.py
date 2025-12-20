@@ -3,19 +3,17 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 import zipfile
 import io
-import re
 import sqlite3
 
 # --- Configuração da Página ---
-st.set_page_config(page_title="Gestor eSocial Master", layout="wide", page_icon="🏢")
+st.set_page_config(page_title="Gestor eSocial Universal", layout="wide", page_icon="🏢")
 
-st.title("🏢 Gestor de Folha eSocial (Detalhado)")
+st.title("🏢 Gestor de Folha eSocial (Leitor Universal)")
 st.markdown("""
-Sistema de auditoria com opção de visualizar itens repetidos linha a linha.
+Versão 10.0: Busca profunda de tags ignorando namespaces e estrutura rígida.
 """)
 
-# --- GERENCIAMENTO DO BANCO DE DADOS ---
-
+# --- BANCO DE DADOS (Igual à versão anterior) ---
 def init_db():
     conn = sqlite3.connect('esocial_db.db')
     c = conn.cursor()
@@ -23,11 +21,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS funcionarios (cpf TEXT PRIMARY KEY, nome TEXT, departamento TEXT)''')
     try: c.execute("ALTER TABLE rubricas ADD COLUMN nome_personalizado TEXT")
     except sqlite3.OperationalError: pass
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-def get_db_connection():
-    return sqlite3.connect('esocial_db.db')
+def get_db_connection(): return sqlite3.connect('esocial_db.db')
 
 def carregar_rubricas_db():
     conn = get_db_connection()
@@ -45,138 +41,134 @@ def carregar_funcionarios_db():
     return df
 
 def salvar_alteracoes_rubricas(df_edited):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM rubricas")
-    for index, row in df_edited.iterrows():
-        c.execute("INSERT INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", 
-                  (str(row['codigo']), str(row['tipo']), str(row['nome_personalizado']) if pd.notna(row['nome_personalizado']) else ""))
-    conn.commit()
-    conn.close()
+    conn = get_db_connection(); c = conn.cursor(); c.execute("DELETE FROM rubricas")
+    for _, row in df_edited.iterrows():
+        c.execute("INSERT INTO rubricas VALUES (?, ?, ?)", (str(row['codigo']), str(row['tipo']), str(row['nome_personalizado']) if pd.notna(row['nome_personalizado']) else ""))
+    conn.commit(); conn.close()
 
 def salvar_alteracoes_funcionarios(df_edited):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM funcionarios")
-    for index, row in df_edited.iterrows():
-        c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", 
-                  (str(row['cpf']), str(row['nome']) if pd.notna(row['nome']) else "", str(row['departamento']) if pd.notna(row['departamento']) else ""))
-    conn.commit()
-    conn.close()
+    conn = get_db_connection(); c = conn.cursor(); c.execute("DELETE FROM funcionarios")
+    for _, row in df_edited.iterrows():
+        c.execute("INSERT INTO funcionarios VALUES (?, ?, ?)", (str(row['cpf']), str(row['nome']) if pd.notna(row['nome']) else "", str(row['departamento']) if pd.notna(row['departamento']) else ""))
+    conn.commit(); conn.close()
 
-# --- IMPORTADOR ---
 def importar_referencia_funcionarios(df_ref, col_cpf, col_nome, col_depto):
-    conn = get_db_connection()
-    c = conn.cursor()
-    count = 0
+    conn = get_db_connection(); c = conn.cursor(); count = 0
     for _, row in df_ref.iterrows():
-        c.execute("INSERT OR REPLACE INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", 
-                  (str(row[col_cpf]), str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else "", str(row[col_depto]) if col_depto and pd.notna(row[col_depto]) else "Geral"))
+        c.execute("INSERT OR REPLACE INTO funcionarios VALUES (?, ?, ?)", (str(row[col_cpf]), str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else "", str(row[col_depto]) if col_depto and pd.notna(row[col_depto]) else "Geral"))
         count += 1
-    conn.commit()
-    conn.close()
-    return count
+    conn.commit(); conn.close(); return count
 
 def importar_referencia_rubricas(df_ref, col_cod, col_nome, col_tipo):
-    conn = get_db_connection()
-    c = conn.cursor()
-    count = 0
-    c.execute("SELECT codigo, tipo FROM rubricas")
-    existentes = {row[0]: row[1] for row in c.fetchall()}
+    conn = get_db_connection(); c = conn.cursor(); count = 0
+    c.execute("SELECT codigo, tipo FROM rubricas"); existentes = {row[0]: row[1] for row in c.fetchall()}
     for _, row in df_ref.iterrows():
         cod = str(row[col_cod])
         tipo = str(row[col_tipo]) if col_tipo and pd.notna(row[col_tipo]) else existentes.get(cod, "Provento")
         nome = str(row[col_nome]) if col_nome and pd.notna(row[col_nome]) else ""
-        c.execute("INSERT OR REPLACE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (cod, tipo, nome))
-        count += 1
-    conn.commit()
-    conn.close()
-    return count
+        c.execute("INSERT OR REPLACE INTO rubricas VALUES (?, ?, ?)", (cod, tipo, nome)); count += 1
+    conn.commit(); conn.close(); return count
 
 init_db()
 
-# --- SIDEBAR ---
+# --- BACKUP ---
 st.sidebar.header("💾 Backup")
-uploaded_db = st.sidebar.file_uploader("Restaurar .db", type=["db"])
-if uploaded_db:
-    if st.sidebar.button("♻️ Restaurar"):
-        with open("esocial_db.db", "wb") as f: f.write(uploaded_db.getbuffer())
+udb = st.sidebar.file_uploader("Restaurar .db", type=["db"])
+if udb: 
+    if st.sidebar.button("♻️ Restaurar"): 
+        with open("esocial_db.db", "wb") as f: f.write(udb.getbuffer())
         st.success("Ok!"); st.rerun()
 if st.sidebar.button("Download Backup"):
     with open("esocial_db.db", "rb") as f: st.sidebar.download_button("⬇️ Baixar .db", f.read(), "esocial_backup.db", "application/x-sqlite3")
-
 st.sidebar.divider()
 
-# --- XML ---
-def clean_xml_content(xml_content):
-    try:
-        if isinstance(xml_content, bytes): xml_str = xml_content.decode('utf-8', errors='ignore')
-        else: xml_str = xml_content
-        xml_str = re.sub(r'\sxmlns(:[a-zA-Z0-9]+)?="[^"]+"', '', xml_str)
-        xml_str = re.sub(r'<([a-zA-Z0-9]+):', '<', xml_str)
-        xml_str = re.sub(r'</([a-zA-Z0-9]+):', '</', xml_str)
-        return xml_str
-    except: return xml_content
+# --- LÓGICA DE LEITURA UNIVERSAL (SEM REGEX) ---
 
-def estimar_tipo_rubrica_inicial(codigo):
-    code_upper = str(codigo).upper()
-    keywords_desc = ['INSS', 'IRRF', 'DESC', 'ADIANT', 'FALT', 'ATRASO', 'RETENCAO', 'VALE', 'VR', 'VT']
-    keywords_info = ['BASE', 'FGTS']
-    for k in keywords_info:
-        if k in code_upper: return "Informativo"
-    for k in keywords_desc:
-        if k in code_upper: return "Desconto"
-    return "Provento"
+def safe_find_text(element, tag_suffix):
+    """Busca tag ignorando namespace (ex: encontra 'ns1:cpfTrab' procurando só 'cpfTrab')"""
+    for child in element.iter():
+        if child.tag.endswith(tag_suffix):
+            return child.text
+    return None
 
 def process_xml_file(file_content, filename, rubricas_conhecidas):
     data_rows = []
     novas_rubricas = {} 
     cpfs_encontrados = set()
+
     try:
-        clean_xml = clean_xml_content(file_content)
-        root = ET.fromstring(clean_xml)
-        eventos = root.findall(".//evtRemun")
+        # Lê o XML puro, sem tentar limpar texto com regex (evita corrupção)
+        root = ET.fromstring(file_content)
+        
+        # 1. Encontrar todos os EVENTOS (S-1200) ignorando namespace
+        eventos = []
+        for elem in root.iter():
+            if elem.tag.endswith('evtRemun'):
+                eventos.append(elem)
         
         for evt in eventos:
-            ide_evento = evt.find("ideEvento")
-            per_apur = ide_evento.find("perApur").text if ide_evento else "N/A"
-            ide_trab = evt.find("ideTrabalhador")
-            cpf_val = ide_trab.find("cpfTrab").text if ide_trab is not None else "N/A"
+            # Dados do Cabeçalho
+            per_apur = safe_find_text(evt, 'perApur') or "N/A"
+            cpf_val = safe_find_text(evt, 'cpfTrab') or "N/A"
             cpfs_encontrados.add(cpf_val)
 
-            demonstrativos = evt.findall(".//dmDev")
+            # 2. Encontrar DEMONSTRATIVOS (dmDev) dentro deste evento
+            demonstrativos = []
+            for child in evt.iter():
+                if child.tag.endswith('dmDev'):
+                    demonstrativos.append(child)
+
             for dm in demonstrativos:
-                id_demo = dm.find("ideDmDev").text if dm.find("ideDmDev") is not None else "N/A"
+                # Tenta pegar o ID do demonstrativo direto no filho imediato para precisão
+                id_demo = "N/A"
+                for child in dm:
+                    if child.tag.endswith('ideDmDev'):
+                        id_demo = child.text
+                        break
                 
-                itens = dm.findall(".//itensRemun")
-                # Adicionado contador para gerar ID único para linhas repetidas no mesmo demonstrativo
-                idx_item = 0 
-                for item in itens:
+                # 3. Encontrar RUBRICAS (itensRemun) dentro deste demonstrativo
+                # Usamos .iter() aqui para pegar até as que estão em 'infoPerAnt' (retroativos)
+                itens_no_demonstrativo = []
+                for child in dm.iter():
+                    if child.tag.endswith('itensRemun'):
+                        itens_no_demonstrativo.append(child)
+                
+                idx_item = 0
+                for item in itens_no_demonstrativo:
                     idx_item += 1
-                    cod_rubr = item.find("codRubr").text if item.find("codRubr") is not None else ""
-                    vr_rubr = item.find("vrRubr").text if item.find("vrRubr") is not None else "0.00"
                     
-                    # --- EXTRAÇÃO DE REFERÊNCIA (Qtd ou Fator) ---
-                    qtd_rubr = item.find("qtdRubr")
-                    fator_rubr = item.find("fatorRubr")
+                    # Extração segura dos campos
+                    cod_rubr = ""
+                    vr_rubr = "0.00"
                     referencia = ""
-                    if qtd_rubr is not None: referencia = qtd_rubr.text
-                    elif fator_rubr is not None: referencia = fator_rubr.text
                     
+                    for sub in item:
+                        if sub.tag.endswith('codRubr'): cod_rubr = sub.text
+                        if sub.tag.endswith('vrRubr'): vr_rubr = sub.text
+                        if sub.tag.endswith('qtdRubr'): referencia = sub.text
+                        if sub.tag.endswith('fatorRubr'): referencia = sub.text
+                    
+                    if not cod_rubr: continue # Pula se não tiver código (sujeira)
+
                     try: valor = float(vr_rubr)
                     except: valor = 0.00
-                    
+
+                    # Lógica de Classificação
                     nome_final = ""
                     if cod_rubr in rubricas_conhecidas: 
                         tipo_final = rubricas_conhecidas[cod_rubr]['tipo']
                         nome_final = rubricas_conhecidas[cod_rubr]['nome_personalizado']
                     else:
-                        tipo_final = estimar_tipo_rubrica_inicial(cod_rubr)
+                        code_upper = str(cod_rubr).upper()
+                        if any(k in code_upper for k in ['BASE', 'FGTS']): tipo_final = "Informativo"
+                        elif any(k in code_upper for k in ['INSS', 'IRRF', 'DESC', 'ADIANT']): tipo_final = "Desconto"
+                        else: tipo_final = "Provento"
+                        
                         novas_rubricas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                         rubricas_conhecidas[cod_rubr] = {'tipo': tipo_final, 'nome_personalizado': ''}
                     
                     data_rows.append({
-                        "Unique_ID": f"{filename}_{cpf_val}_{id_demo}_{idx_item}", # Garante unicidade
+                        "Unique_ID": f"{filename}_{cpf_val}_{id_demo}_{idx_item}_{cod_rubr}",
                         "Competencia": per_apur,
                         "CPF": cpf_val,
                         "ID_Demonstrativo": id_demo,
@@ -186,10 +178,15 @@ def process_xml_file(file_content, filename, rubricas_conhecidas):
                         "Tipo": tipo_final,
                         "Valor": valor
                     })
-    except: return [], {}, set()
+                    
+    except Exception as e:
+        # Em caso de erro grave no arquivo, ignora e segue pro próximo
+        print(f"Erro XML: {e}")
+        return [], {}, set()
+        
     return data_rows, novas_rubricas, cpfs_encontrados
 
-# --- APP START ---
+# --- INTERFACE ---
 rubricas_db = carregar_rubricas_db()
 funcionarios_db = carregar_funcionarios_db()
 
@@ -226,21 +223,17 @@ if uploaded_file:
                 r_memoria.update(nr)
                 cpfs_geral.update(cpfs)
 
-            # Salva Novos
             if novas_r_geral:
-                conn = get_db_connection()
-                c = conn.cursor()
+                conn = get_db_connection(); c = conn.cursor()
                 for cod, dados in novas_r_geral.items():
-                    c.execute("INSERT OR IGNORE INTO rubricas (codigo, tipo, nome_personalizado) VALUES (?, ?, ?)", (str(cod), str(dados['tipo']), str(dados['nome_personalizado'])))
+                    c.execute("INSERT OR IGNORE INTO rubricas VALUES (?, ?, ?)", (str(cod), str(dados['tipo']), str(dados['nome_personalizado'])))
                 conn.commit(); conn.close()
 
-            conn = get_db_connection(); c = conn.cursor()
-            nf = 0
+            conn = get_db_connection(); c = conn.cursor(); nf = 0
             for cpf in cpfs_geral:
                 c.execute("SELECT cpf FROM funcionarios WHERE cpf = ?", (str(cpf),))
                 if not c.fetchone():
-                    c.execute("INSERT INTO funcionarios (cpf, nome, departamento) VALUES (?, ?, ?)", (str(cpf), "", "Geral"))
-                    nf += 1
+                    c.execute("INSERT INTO funcionarios VALUES (?, ?, ?)", (str(cpf), "", "Geral")); nf += 1
             conn.commit(); conn.close()
             
             if nf > 0: st.toast(f"{nf} novos funcs.", icon="👥")
@@ -313,19 +306,17 @@ if 'df_bruto' in st.session_state:
                 sel_cp = st.multiselect("Comp:", cps, default=[cps[-1]] if cps else [])
             else: sel_cp = []
         
-        # --- NOVA LÓGICA DE AGRUPAMENTO ---
-        agrupar = st.checkbox("Agrupar rubricas repetidas (Somar valores)?", value=True)
+        # OPÇÃO DE AGRUPAMENTO (Padrão False para ver TUDO)
+        agrupar = st.checkbox("Agrupar rubricas repetidas?", value=False)
         
         if sel_cpf and sel_cp:
             mask = (df_f["CPF"] == sel_cpf) & (df_f["Competencia"].isin(sel_cp))
             df_h = df_f[mask].copy()
             
             if agrupar:
-                # Agrupa e soma (Lógica antiga)
                 df_show = df_h.groupby(["Rubrica", "Descrição", "Tipo"])["Valor"].sum().reset_index()
-                df_show["Referencia"] = "-" # Agrupado perde a referencia individual
+                df_show["Referencia"] = "-"
             else:
-                # Mostra detalhado linha a linha (Lógica nova)
                 df_show = df_h[["Rubrica", "Descrição", "Referencia", "Tipo", "Valor"]].sort_values("Rubrica")
 
             tp = df_show[df_show["Tipo"] == "Provento"]["Valor"].sum()
@@ -335,13 +326,11 @@ if 'df_bruto' in st.session_state:
             st.markdown(f"### {sel_f}")
             k1, k2, k3 = st.columns(3)
             k1.metric("Proventos", f"R$ {tp:,.2f}"); k2.metric("Descontos", f"R$ {td:,.2f}"); k3.metric("Líquido", f"R$ {tp - td:,.2f}")
-            
             def cor(v): return 'color: red' if v == 'Desconto' else 'color: green' if v == 'Provento' else 'color: black'
             st.table(df_show.style.applymap(cor, subset=['Tipo']).format({"Valor": "{:.2f}"}))
 
     with tab3:
         st.header("⚙️ DB & Importação")
-        
         st.subheader("Importar Planilha")
         ref_file = st.file_uploader("Upload Excel/CSV", type=["xlsx", "csv"])
         if ref_file:
@@ -349,7 +338,6 @@ if 'df_bruto' in st.session_state:
                 if ref_file.name.endswith('.csv'): df_ref = pd.read_csv(ref_file)
                 else: df_ref = pd.read_excel(ref_file)
                 st.success(f"Lido: {len(df_ref)} linhas.")
-                st.dataframe(df_ref.head(3))
                 tipo = st.radio("Tipo:", ["Funcionários", "Rubricas"], horizontal=True)
                 cols = df_ref.columns.tolist()
                 
@@ -369,10 +357,9 @@ if 'df_bruto' in st.session_state:
                     if st.button("Importar Rubricas"):
                         importar_referencia_rubricas(df_ref, cc, cn if cn!="(Ignorar)" else None, ct if ct!="(Ignorar)" else None)
                         st.success("Feito!"); st.rerun()
-            except Exception as e: st.error(f"Erro: {e}. (Verifique se openpyxl está no requirements.txt)")
+            except Exception as e: st.error(f"Erro: {e}.")
 
-        st.divider()
-        c1, c2 = st.columns(2)
+        st.divider(); c1, c2 = st.columns(2)
         with c1:
             st.subheader("Funcionários")
             df_f_ed = st.data_editor(carregar_funcionarios_db(), num_rows="dynamic", key="ed_f")
